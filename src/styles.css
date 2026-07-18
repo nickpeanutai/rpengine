@@ -67,7 +67,7 @@ p { color: var(--swift-secondary); line-height: 1.45; margin-bottom: 0; }
 .social-youtube .social-icon-play { fill: currentColor; stroke: none; }
 .social-tiktok { --social-color: #65e5df; }
 .social-tiktok svg { stroke-width: 2.1; }
-.github-pill { align-items: center; border: 1px solid #776a5b; border-radius: 999px; background: rgb(247 234 210 / 8%); box-shadow: inset 0 1px rgb(255 255 255 / 7%), 0 8px 20px rgb(0 0 0 / 18%); color: #f7ead2; display: inline-flex; flex: 0 0 auto; font-size: .72rem; font-weight: 800; gap: 6px; height: 30px; padding: 0 9px; text-decoration: none; transition: background .15s ease, border-color .15s ease, transform .15s ease; white-space: nowrap; }
+.github-pill { align-items: center; border: 1px solid #776a5b; border-radius: 999px; background: rgb(247 234 210 / 8%); box-shadow: inset 0 1px rgb(255 255 255 / 7%), 0 8px 20px rgb(0 0 0 / 18%); color: #f7ead2; display: inline-flex; flex: 0 0 auto; font-size: .72rem; font-weight: 800; gap: 6px; height: 40px; padding: 0 9px; text-decoration: none; transition: background .15s ease, border-color .15s ease, transform .15s ease; white-space: nowrap; }
 .github-pill:hover { background: rgb(247 234 210 / 14%); border-color: #a18d75; transform: translateY(-1px); }
 .github-pill:focus-visible { outline: 2px solid var(--swift-accent); outline-offset: 2px; }
 .github-pill svg { fill: currentColor; height: 18px; width: 18px; }
