@@ -7,12 +7,6 @@
 
   <p><strong>A local-first character roleplay engine for games.</strong></p>
 
-  <p>
-    <a href="https://rpengine.gemtavern.com/"><img src="https://img.shields.io/badge/Launch-RPEngine-d8a64b?style=for-the-badge" alt="Launch RPEngine"></a>
-    <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-8b6f47?style=for-the-badge" alt="AGPL-3.0 license"></a>
-    <img src="https://img.shields.io/badge/Inference-On--device-4f8f68?style=for-the-badge" alt="On-device inference">
-  </p>
-
   <a href="https://rpengine.gemtavern.com/">
     <img src="./docs/assets/rpengine-preview.png" width="1100" alt="GemTavern RPEngine running locally in the browser">
   </a>
