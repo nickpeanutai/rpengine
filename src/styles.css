@@ -66,6 +66,10 @@ p { color: var(--swift-secondary); line-height: 1.45; margin-bottom: 0; }
 .social-youtube .social-icon-play { fill: currentColor; stroke: none; }
 .social-tiktok { --social-color: #65e5df; }
 .social-tiktok svg { stroke-width: 2.1; }
+.github-pill { align-items: center; border: 1px solid #776a5b; border-radius: 999px; background: rgb(247 234 210 / 8%); box-shadow: inset 0 1px rgb(255 255 255 / 7%), 0 8px 20px rgb(0 0 0 / 18%); color: #f7ead2; display: inline-flex; flex: 0 0 auto; font-size: .78rem; font-weight: 800; gap: 6px; height: 40px; padding: 0 10px; text-decoration: none; transition: background .15s ease, border-color .15s ease, transform .15s ease; white-space: nowrap; }
+.github-pill:hover { background: rgb(247 234 210 / 14%); border-color: #a18d75; transform: translateY(-1px); }
+.github-pill:focus-visible { outline: 2px solid var(--swift-accent); outline-offset: 2px; }
+.github-pill svg { fill: currentColor; height: 18px; width: 18px; }
 .eyebrow { color: #d9a95b; font-size: .68rem; font-weight: 800; letter-spacing: .14em; margin-bottom: 2px; text-transform: uppercase; }
 .status { border: 1px solid var(--swift-border); border-radius: 999px; background: rgb(20 16 9 / 88%); color: var(--swift-text); font-size: .78rem; font-weight: 800; padding: 8px 12px; text-align: center; }
 .status.success { border-color: rgb(90 154 106 / 68%); background: rgb(90 154 106 / 14%); color: #83c491; }
@@ -135,7 +139,7 @@ dialog::backdrop { background: rgb(8 6 4 / 82%); backdrop-filter: blur(3px); }
 .api-docs pre { border: 1px solid var(--swift-border); border-radius: 9px; background: var(--swift-inset); margin: 0; overflow: auto; padding: 14px; }
 .api-docs pre code { color: var(--swift-text); font-size: 12px; line-height: 1.55; }
 
-@media (max-width: 980px) {
+@media (max-width: 1120px) {
   .hero { align-items: stretch; flex-direction: column; }
   .hero-actions { justify-content: flex-start; flex-wrap: wrap; }
 }
