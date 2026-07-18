@@ -10,8 +10,6 @@
   <a href="https://rpengine.gemtavern.com/">
     <img src="./docs/assets/rpengine-preview.png" width="1100" alt="GemTavern RPEngine running locally in the browser">
   </a>
-
-  <p><sub>Install the models once, then run character inference locally in your browser.</sub></p>
 </div>
 
 ## Local AI for character-driven games
