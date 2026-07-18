@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "include": [
+    "/wasm/litertlm_wasm_asyncify_internal.wasm",
+    "/wasm/litertlm_wasm_compat_asyncify_internal.wasm"
+  ],
+  "exclude": []
+}

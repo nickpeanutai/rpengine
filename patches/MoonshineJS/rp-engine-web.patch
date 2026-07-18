@@ -1,0 +1,63 @@
+diff --git a/src/model.ts b/src/model.ts
+index 51d76b1..aa1954e 100644
+--- a/src/model.ts
++++ b/src/model.ts
+@@ -1,7 +1,13 @@
+-import * as ort from "onnxruntime-web";
++// @ts-nocheck -- this file stays aligned with upstream Moonshine JS, which is not strict-TypeScript clean.
++import * as ort from "onnxruntime-web/wasm";
+ import llamaTokenizer from "llama-tokenizer-js";
+-import { Settings } from "./constants";
+-import Log from "./log";
++import { MoonshineLog as Log, MoonshineSettings as Settings } from "../../src/moonshine-official-host";
++
++export interface MoonshineModelSources {
++    encoder: Uint8Array;
++    decoder: Uint8Array;
++    wasmPath?: string;
++}
+ 
+ function argMax(array) {
+     return [].map
+@@ -24,6 +30,7 @@ export default class MoonshineModel {
+     private lastLatency: number | undefined = undefined;
+     private isModelLoading: boolean = false;
+     private loadPromise: Promise<void>;
++    private sources: MoonshineModelSources | undefined;
+ 
+     /**
+      * Create (but do not load) a new MoonshineModel for inference.
+@@ -32,7 +39,7 @@ export default class MoonshineModel {
+      *
+      * @remarks Creating a MoonshineModel has the side effect of setting the path to the `onnxruntime-web` `.wasm` to the {@link Settings.BASE_ASSET_PATH}
+      */
+-    public constructor(inputModelURL: string, precision: string = "quantized") {
++    public constructor(inputModelURL: string, precision: string = "quantized", sources?: MoonshineModelSources) {
+         // Switch to per-language naming convention for English models.
+         let modelURL = inputModelURL;
+         if (modelURL === "model/tiny") {
+@@ -42,7 +49,8 @@ export default class MoonshineModel {
+         }
+         this.modelURL = Settings.BASE_ASSET_PATH.MOONSHINE + modelURL;
+         this.precision = precision;
+-        ort.env.wasm.wasmPaths = Settings.BASE_ASSET_PATH.ONNX_RUNTIME;
++        this.sources = sources;
++        ort.env.wasm.wasmPaths = sources?.wasmPath ?? Settings.BASE_ASSET_PATH.ONNX_RUNTIME;
+         this.model = {
+             encoder: undefined,
+             decoder: undefined,
+@@ -153,12 +161,12 @@ export default class MoonshineModel {
+             );
+ 
+             this.model.encoder = await ort.InferenceSession.create(
+-                this.modelURL + "/" + this.precision + "/encoder_model.ort",
++                this.sources?.encoder ?? this.modelURL + "/" + this.precision + "/encoder_model.ort",
+                 sessionOption
+             );
+ 
+             this.model.decoder = await ort.InferenceSession.create(
+-                this.modelURL +
++                this.sources?.decoder ?? this.modelURL +
+                 "/" +
+                 this.precision +
+                 "/decoder_model_merged.ort",

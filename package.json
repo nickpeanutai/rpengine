@@ -1,0 +1,46 @@
+{
+  "name": "rpengine",
+  "version": "1.3.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "core:setup": "node scripts/setup-core.mjs",
+    "core:build": "node scripts/build-core.mjs",
+    "core:test": "cargo test --manifest-path crates/rp-engine-core/Cargo.toml --locked",
+    "core:verify": "node scripts/verify-core-wasm.mjs",
+    "moonshine-js:verify": "node scripts/verify-moonshine-js.mjs",
+    "moonshine-native:verify": "node scripts/verify-moonshine-native.mjs",
+    "moonshine:verify": "npm run moonshine-js:verify && npm run moonshine-native:verify",
+    "models:smoke": "node scripts/verify-model-origins.mjs --smoke",
+    "models:audit": "node scripts/verify-model-origins.mjs --full",
+    "moonshine-v2:parity": "node scripts/run-moonshine-v2-parity.mjs",
+    "audit:bundle": "node scripts/audit-production-bundle.mjs",
+    "prepare:wasm": "node scripts/sync-litert-wasm.mjs",
+    "postinstall": "npm run prepare:wasm",
+    "dev": "npm run build && vite preview --host 127.0.0.1 --port 5173 --strictPort",
+    "dev:ui": "npm run moonshine:verify && npm run core:build && npm run prepare:wasm && vite --host 127.0.0.1 --port 5173 --strictPort",
+    "mock-game": "node tools/mock-game/server.mjs",
+    "build": "npm run moonshine:verify && npm run core:build && npm run prepare:wasm && tsc --noEmit && vite build && npm run audit:bundle",
+    "preview": "vite preview --host 127.0.0.1 --port 5173 --strictPort",
+    "test": "npm run moonshine:verify && npm run core:build && npm run core:test && vitest run"
+  },
+  "dependencies": {
+    "@litert-lm/core": "0.14.0",
+    "hash-wasm": "4.12.0",
+    "llama-tokenizer-js": "1.2.2",
+    "onnxruntime-web": "1.27.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "binaryen": "130.0.0",
+    "typescript": "^5.5.4",
+    "vite": "^7.0.0",
+    "vitest": "4.1.10",
+    "ws": "^8.18.3",
+    "yaml": "2.8.1"
+  }
+}

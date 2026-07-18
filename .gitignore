@@ -1,0 +1,10 @@
+node_modules/
+dist/
+public/wasm/
+public/ort-wasm/
+tools/mock-game/test-output/
+reference/
+.tools/
+crates/rp-engine-core/target/
+src/generated/rp-engine-core/
+.DS_Store

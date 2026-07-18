@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#1a100b" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" href="/icon-192.png" />
+    <title>GemTavern RPEngine</title>
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div class="brand">
+          <img class="app-icon" src="/brand/app-icon.png" alt="" width="82" height="82" />
+          <div class="brand-copy">
+            <p class="eyebrow">Character Roleplay Engine</p>
+            <div class="brand-title">
+              <h1>GemTavern RPEngine</h1>
+            </div>
+          </div>
+        </div>
+        <div class="hero-actions">
+          <button id="microphoneButton" type="button" class="secondary compact">Enable microphone</button>
+          <button id="settingsButton" type="button" class="secondary compact">Settings</button>
+          <button id="apiDocsButton" type="button" class="secondary compact">Mod integration API</button>
+          <nav class="social-links" aria-label="GemTavern social media">
+            <a class="social-button social-discord" href="https://discord.com/invite/6bg6cc8Vbq" target="_blank" rel="noopener noreferrer" aria-label="Join GemTavern on Discord" title="Discord">
+              <svg viewBox="4 4.5 16 12" aria-hidden="true">
+                <path d="M7.15 6.35A15.2 15.2 0 0 1 12 5.55c1.72 0 3.35.28 4.85.8a13.1 13.1 0 0 1 2.45 6.55 12.2 12.2 0 0 1-4.8 2.55l-1.05-1.4c.58-.18 1.12-.43 1.62-.72a9.1 9.1 0 0 1-6.14 0c.5.29 1.04.54 1.62.72l-1.05 1.4a12.2 12.2 0 0 1-4.8-2.55 13.1 13.1 0 0 1 2.45-6.55Zm2.6 5.75c.66 0 1.2-.62 1.2-1.38s-.55-1.38-1.2-1.38c-.67 0-1.2.62-1.2 1.38s.54 1.38 1.2 1.38Zm4.5 0c.66 0 1.2-.62 1.2-1.38s-.54-1.38-1.2-1.38-1.2.62-1.2 1.38.54 1.38 1.2 1.38Z" />
+              </svg>
+            </a>
+            <a class="social-button social-x" href="https://x.com/nickpeanutai" target="_blank" rel="noopener noreferrer" aria-label="Follow Nick Peanut AI on X" title="X">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M18.24 2.25h3.31l-7.23 8.26 8.51 11.24h-6.66l-5.21-6.82-5.97 6.82H1.68l7.73-8.84L1.25 2.25h6.83l4.71 6.23 5.45-6.23Zm-1.16 17.52h1.83L7.08 4.13H5.12l11.96 15.64Z" />
+              </svg>
+            </a>
+            <a class="social-button social-instagram" href="https://www.instagram.com/nickpeanutai/" target="_blank" rel="noopener noreferrer" aria-label="Follow Nick Peanut AI on Instagram" title="Instagram">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3.2" y="3.2" width="17.6" height="17.6" rx="5.1" />
+                <circle cx="12" cy="12" r="4.15" />
+                <circle class="social-icon-dot" cx="17.45" cy="6.65" r="1.05" />
+              </svg>
+            </a>
+            <a class="social-button social-youtube" href="https://www.youtube.com/@nickpeanutai" target="_blank" rel="noopener noreferrer" aria-label="Subscribe to Nick Peanut AI on YouTube" title="YouTube">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="2.5" y="5.2" width="19" height="13.6" rx="4.2" />
+                <path class="social-icon-play" d="m10.2 9 5 3-5 3V9Z" />
+              </svg>
+            </a>
+            <a class="social-button social-tiktok" href="https://www.tiktok.com/@nickpeanutai" target="_blank" rel="noopener noreferrer" aria-label="Follow Nick Peanut AI on TikTok" title="TikTok">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M15.2 3.5v11.1a4.5 4.5 0 1 1-3.8-4.45" />
+                <path d="M15.2 3.5c.55 2.85 2.15 4.45 5.05 4.7" />
+              </svg>
+            </a>
+          </nav>
+        </div>
+      </header>
+
+      <section class="launch">
+        <div class="launch-controls">
+          <button id="primaryButton" type="button" class="primary-action" disabled aria-describedby="engineOwnerNotice">
+            <span id="primaryButtonProgress" class="primary-action-progress" aria-hidden="true"></span>
+            <span class="primary-action-copy">
+              <strong id="primaryButtonLabel">Checking models…</strong>
+              <small id="primaryButtonDetail">Inspecting local model storage</small>
+            </span>
+          </button>
+          <span class="status launch-status" id="connectionStatus">Not Connected</span>
+        </div>
+        <div id="engineOwnerNotice" class="engine-owner-notice" hidden>
+          RPEngine is already active in another tab. Use that tab to stop or manage RPEngine.
+        </div>
+      </section>
+
+      <section class="panel log-panel" id="diagnosticLog">
+        <header>
+          <div><h2>Runtime Activity Log</h2></div>
+          <div class="actions">
+            <button id="exportLogButton" type="button" class="secondary">Export logs</button>
+          </div>
+        </header>
+        <div id="logEntries" class="log-entries"></div>
+      </section>
+
+      <footer class="site-footer">
+        <p>© 2026 AI-APP-DEV LLC. Source code: AGPL-3.0. RPEngine and GemTavern branding reserved.</p>
+      </footer>
+    </main>
+
+    <dialog id="settingsDialog" aria-labelledby="settingsTitle">
+      <header class="dialog-header">
+        <div>
+          <h2 id="settingsTitle">RPEngine settings</h2>
+        </div>
+        <form method="dialog"><button type="submit" class="secondary compact">Close</button></form>
+      </header>
+      <div class="model-manager">
+        <label class="language-field" for="rpEnginePortInput">
+          <span>Game connection port</span>
+          <input id="rpEnginePortInput" type="number" min="1024" max="65535" step="1" inputmode="numeric" />
+        </label>
+        <label class="language-field" for="languageSelect">
+          <span>Speech input language</span>
+          <select id="languageSelect"></select>
+        </label>
+        <div id="modelEntries" class="model-entries"></div>
+        <p>Downloaded models are stored on this device. They remain installed after you close the app and are available when you reopen it.</p>
+      </div>
+    </dialog>
+
+    <dialog id="apiDocsDialog" aria-labelledby="apiDocsTitle">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">Developer documentation</p>
+          <h2 id="apiDocsTitle">Game and Mod Integration API</h2>
+        </div>
+        <form method="dialog"><button type="submit" class="secondary compact" aria-label="Close API documentation">Close</button></form>
+      </header>
+      <div class="api-docs">
+        <section>
+          <h3>Connect your game</h3>
+          <ul>
+            <li>Start a WebSocket listener at <code>ws://127.0.0.1:PORT/rp-engine/socket</code>.</li>
+            <li>Use the same port in the game integration and RPEngine settings. The default is <code>38471</code>.</li>
+          </ul>
+        </section>
+
+        <section>
+          <h3>Connection handshake</h3>
+          <p>RPEngine sends <code>hello</code> immediately after opening the WebSocket. Reply within five seconds with <code>welcome</code> containing a new <code>sessionId</code> and your <code>serverVersion</code>. RPEngine repeats this handshake whenever it reconnects.</p>
+          <p>Every envelope includes <code>protocol: "gemtavern.rp_engine"</code>, <code>protocolVersion: 3</code>, a unique <code>messageId</code>, an ISO 8601 <code>timestamp</code>, and <code>type</code>. The initial <code>hello</code> has no session yet; <code>welcome</code> establishes one, and later messages use that <code>sessionId</code>.</p>
+          <p>RPEngine returns <code>ack</code> for valid game or mod messages. A repeated <code>messageId</code> is acknowledged as a duplicate and is not processed twice. Do not acknowledge an <code>ack</code>.</p>
+          <pre><code>{
+  "protocol": "gemtavern.rp_engine",
+  "protocolVersion": 3,
+  "type": "welcome",
+  "messageId": "unique-message-id",
+  "sessionId": "new-session-id",
+  "timestamp": "2026-07-16T00:00:00.000Z",
+  "serverVersion": "my-game-1.0"
+}</code></pre>
+        </section>
+
+        <section>
+          <h3>Synchronize a character</h3>
+          <p>Send <code>character.sync</code> to preload or update a character without starting inference. Include <code>integrationId</code>, <code>characterId</code>, and a Character Card V2 transfer. RPEngine replies with <code>character.synced</code> and the accepted <code>targetHash</code>.</p>
+          <p>Character caches belong to one connection session. Send a snapshot after every new handshake before using patch or reference transfers.</p>
+        </section>
+
+        <section>
+          <h3>Reply request</h3>
+          <p>The following example assumes this character hash was already acknowledged by <code>character.synced</code> or an earlier snapshot request in the current session.</p>
+          <pre><code>{
+  "protocol": "gemtavern.rp_engine",
+  "protocolVersion": 3,
+  "type": "reply.request",
+  "messageId": "message-id",
+  "sessionId": "session-id",
+  "timestamp": "2026-07-14T00:00:00.000Z",
+  "requestId": "request-id",
+  "eventId": "event-id",
+  "integrationId": "my-game",
+  "characterId": "character-1",
+  "event": {
+    "text": "Optional typed context alongside the recording.",
+    "audio": {
+      "format": "pcm_s16le",
+      "sampleRate": 16000,
+      "channels": 1,
+      "language": "en",
+      "data": "BASE64_PCM_DATA"
+    }
+  },
+  "output": {
+    "modalities": ["text", "audio"],
+    "language": "en",
+    "audio": {
+      "model": "gemtavern-supertonic-3",
+      "voice": "F4",
+      "format": "pcm_s16le"
+    }
+  },
+  "player": { "displayName": "Player" },
+  "card": {
+    "format": "chara_card_v2",
+    "mode": "reference",
+    "targetHash": "sha256-canonical-card-hash"
+  }
+}</code></pre>
+          <p>Provide <code>event.text</code>, <code>event.audio</code>, or both. Audio must be mono, 16 kHz, base64-encoded <code>pcm_s16le</code> or <code>pcm_f32le</code>, and no longer than 30 seconds. Supported audio languages are <code>en</code>, <code>ar</code>, <code>es</code>, <code>ja</code>, <code>ko</code>, <code>vi</code>, <code>uk</code>, and <code>zh</code>.</p>
+          <p>Games may include <code>interactionMode</code>, <code>promptScene</code>, and <code>promptDirective</code> together. RPEngine uses <code>autoEventGuide</code> only for <code>auto_event</code>, and <code>directUserGuide</code> only for <code>direct_user</code>; <code>sceneContext</code> supplies the shared scene once.</p>
+          <p>Use <code>["text"]</code> for a text response. Use <code>["text", "audio"]</code> with model <code>gemtavern-supertonic-3</code>, format <code>pcm_s16le</code>, and voice <code>F1</code>–<code>F5</code> or <code>M1</code>–<code>M5</code> when your game also wants speech.</p>
+          <p>Supported speech-output languages are <code>en</code>, <code>ko</code>, <code>es</code>, <code>pt</code>, <code>fr</code>, <code>de</code>, <code>it</code>, <code>pl</code>, <code>ru</code>, <code>nl</code>, <code>cs</code>, <code>ar</code>, <code>zh</code>, <code>ja</code>, <code>hu</code>, <code>tr</code>, <code>fi</code>, <code>sk</code>, <code>da</code>, <code>hr</code>, <code>el</code>, <code>sv</code>, <code>nb</code>, <code>he</code>, <code>uk</code>, <code>id</code>, <code>ms</code>, <code>vi</code>, <code>th</code>, <code>ro</code>, and <code>bg</code>.</p>
+        </section>
+
+        <section>
+          <h3>Browser microphone request</h3>
+          <p>Use <code>voice.capture.start</code> when the player should speak through the microphone attached to the RPEngine browser. It uses the same <code>requestId</code>, <code>eventId</code>, <code>integrationId</code>, <code>characterId</code>, <code>output</code>, <code>player</code>, card transfer, and optional prompt fields as <code>reply.request</code>, but it does not include <code>event</code>.</p>
+          <p>The player must enable microphone access in RPEngine first. RPEngine reports <code>voice.capture.level</code> and <code>voice.capture.state</code>. FireRedVAD normally ends speech automatically; the game may send <code>voice.capture.stop</code> to finish manually or <code>voice.capture.cancel</code> to discard the capture. Successful speech then follows the normal reply stream.</p>
+        </section>
+
+        <section>
+          <h3>Character card transfer</h3>
+          <p>Character Card V2 is the canonical character format. Send a complete <code>chara_card_v2</code> document with <code>spec_version: "2.0"</code> and all required fields. Use empty values where your game has no content; unknown fields and extension data are preserved.</p>
+          <ul>
+            <li><code>snapshot</code>: full Character Card V2 plus <code>targetHash</code>.</li>
+            <li><code>patch</code>: RFC 6902 operations plus <code>baseHash</code> and <code>targetHash</code>.</li>
+            <li><code>reference</code>: an unchanged session card identified by <code>targetHash</code>.</li>
+          </ul>
+          <p>Hashes are lowercase SHA-256 over RFC 8785 canonical JSON. Begin a connection with a snapshot. If RPEngine returns <code>card_resync_required</code>, resend the request with a snapshot.</p>
+        </section>
+
+        <section>
+          <h3>Response stream</h3>
+          <p>After <code>reply.accepted</code>, text and audio stream concurrently. RPEngine sends <code>reply.text.delta</code> messages while generation continues and begins sending sentence-level <code>reply.audio.chunk</code> messages as soon as complete sentences are available. Audio may therefore begin before <code>reply.text.completed</code>. The request ends with <code>reply.completed</code> after all requested output is complete.</p>
+          <p>Audio chunks contain base64-encoded 44.1 kHz mono PCM16. Group chunks by <code>segmentSequence</code>, then play each completed segment in order while later text and audio continue generating. Your game controls volume, subtitles, interruption, and spatial placement.</p>
+          <ul>
+            <li><code>reply.accepted</code>: the request and card hash were accepted.</li>
+            <li><code>reply.text.delta</code>: clean incremental display text with a zero-based <code>sequence</code>.</li>
+            <li><code>reply.text.completed</code>: complete display text plus generation statistics.</li>
+            <li><code>reply.audio.start</code>: audio format, sample rate, and channel count.</li>
+            <li><code>reply.audio.chunk</code>: global and sentence-segment sequence fields plus base64 PCM bytes.</li>
+            <li><code>reply.audio.completed</code>: final segment, chunk, byte, duration, and synthesis totals.</li>
+            <li><code>reply.completed</code>: terminal success after all requested modalities finish.</li>
+          </ul>
+        </section>
+
+        <section>
+          <h3>Capacity, cancellation, and errors</h3>
+          <p>RPEngine sends <code>capacity.update</code> after connection and whenever capacity changes. It contains <code>acceptingRequests</code>, <code>queueDepth</code>, and <code>queueLimit</code>. Submit new work only while <code>acceptingRequests</code> is true.</p>
+          <p>Send <code>request.cancel</code> with <code>requestId</code> to cancel a queued or active reply. RPEngine answers with <code>reply.cancelled</code>. For microphone capture, use <code>voice.capture.cancel</code>.</p>
+          <p><code>request.error</code> contains <code>requestId</code> when available, <code>sourceMessageId</code>, <code>code</code>, <code>message</code>, and <code>retryable</code>. Common codes include <code>card_resync_required</code>, <code>invalid_character_card</code>, <code>service_not_started</code>, <code>capacity_exceeded</code>, <code>duplicate_request</code>, <code>microphone_not_enabled</code>, <code>unsupported_language</code>, <code>unsupported_voice</code>, and <code>request_failed</code>.</p>
+        </section>
+      </div>
+    </dialog>
+  </body>
+</html>

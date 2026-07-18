@@ -1,0 +1,16 @@
+RPEngine
+Copyright 2026 AI-APP-DEV LLC
+
+First-party source code is licensed under AGPL-3.0-only. RPEngine and GemTavern
+trademarks and the brand assets identified in TRADEMARKS.md are not licensed
+under the AGPL.
+
+Third-party components remain under their respective licenses, including:
+
+- The pinned LiteRT-LM, Moonshine, Moonshine JS, and Supertonic submodules.
+- src/vendor/supertonic-helper.js, licensed under the accompanying
+  src/vendor/SUPERTONIC_LICENSE.
+- FireRedVAD artifacts under public/vad, licensed under the accompanying
+  public/vad/LICENSE-FireRedVAD.
+- npm and Cargo dependencies identified by package-lock.json and Cargo.lock.
+

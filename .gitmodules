@@ -1,0 +1,12 @@
+[submodule "LiteRT-LM"]
+	path = LiteRT-LM
+	url = https://github.com/google-ai-edge/LiteRT-LM.git
+[submodule "supertonic"]
+	path = supertonic
+	url = https://github.com/supertone-inc/supertonic.git
+[submodule "moonshine-js"]
+	path = moonshine-js
+	url = https://github.com/moonshine-ai/moonshine-js.git
+[submodule "moonshine"]
+	path = moonshine
+	url = https://github.com/moonshine-ai/moonshine.git

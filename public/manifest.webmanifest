@@ -1,0 +1,14 @@
+{
+  "name": "GemTavern RPEngine",
+  "short_name": "RPEngine",
+  "description": "Local character-response compute powered by Gemma 4 and Supertonic 3.",
+  "start_url": "/connect",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#120d09",
+  "theme_color": "#1a100b",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
