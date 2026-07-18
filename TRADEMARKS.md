@@ -15,6 +15,7 @@ remain all rights reserved:
 - `public/icon.svg`
 - `public/icon-192.png`
 - `public/icon-512.png`
+- `docs/assets/rpengine-preview.png`
 
 You may make accurate, nominative references to RPEngine or GemTavern when
 describing compatibility, provenance, or the origin of a fork. You may not use
@@ -25,4 +26,3 @@ Publicly distributed forks should replace the reserved names and assets in
 their product identity and user interface. This policy does not limit rights
 that applicable trademark law grants independently, such as fair or nominative
 use.
-

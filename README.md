@@ -14,7 +14,7 @@
   </p>
 
   <a href="https://rpengine.gemtavern.com/">
-    <img src="./public/brand/tavern-background.jpg" width="820" alt="GemTavern's tavern interior artwork">
+    <img src="./docs/assets/rpengine-preview.png" width="1100" alt="GemTavern RPEngine running locally in the browser">
   </a>
 
   <p><sub>Install the models once, then run character inference locally in your browser.</sub></p>
