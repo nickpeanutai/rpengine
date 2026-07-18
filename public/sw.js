@@ -1,4 +1,4 @@
-const CACHE = 'rp-engine-shell-v20';
+const CACHE = 'rp-engine-shell-v21';
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/brand/app-icon.png', '/brand/tavern-background.jpg', '/audio-worklet.js', '/microphone-worklet.js'];
 const VAD = ['/vad/manifest.json', '/vad/fireredvad_stream_vad_with_cache.onnx', '/vad/cmvn.ark', '/vad/LICENSE-FireRedVAD'];
 

@@ -70,6 +70,9 @@ p { color: var(--swift-secondary); line-height: 1.45; margin-bottom: 0; }
 .github-pill:hover { background: rgb(247 234 210 / 14%); border-color: #a18d75; transform: translateY(-1px); }
 .github-pill:focus-visible { outline: 2px solid var(--swift-accent); outline-offset: 2px; }
 .github-pill svg { fill: currentColor; height: 18px; width: 18px; }
+.github-stars { align-items: center; border-left: 1px solid rgb(247 234 210 / 22%); display: inline-flex; gap: 4px; margin-left: 2px; padding-left: 8px; }
+.github-stars[hidden] { display: none; }
+.github-stars svg { height: 13px; width: 13px; }
 .eyebrow { color: #d9a95b; font-size: .68rem; font-weight: 800; letter-spacing: .14em; margin-bottom: 2px; text-transform: uppercase; }
 .status { border: 1px solid var(--swift-border); border-radius: 999px; background: rgb(20 16 9 / 88%); color: var(--swift-text); font-size: .78rem; font-weight: 800; padding: 8px 12px; text-align: center; }
 .status.success { border-color: rgb(90 154 106 / 68%); background: rgb(90 154 106 / 14%); color: #83c491; }

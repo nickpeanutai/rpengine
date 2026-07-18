@@ -2,6 +2,9 @@ import './styles.css';
 import { initializeCore } from './core';
 import { AppHost } from './app-host';
 import { element } from './renderer';
+import { initializeGitHubStars } from './github-stars';
+
+void initializeGitHubStars();
 
 try {
   await initializeCore();

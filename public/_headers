@@ -4,4 +4,4 @@
   Cross-Origin-Resource-Policy: same-origin
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
-  Content-Security-Policy: default-src 'self'; connect-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co https://download.moonshine.ai ws://127.0.0.1:*; worker-src 'self' blob:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; connect-src 'self' https://api.github.com https://huggingface.co https://*.huggingface.co https://*.hf.co https://download.moonshine.ai ws://127.0.0.1:*; worker-src 'self' blob:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'
