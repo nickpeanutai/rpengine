@@ -1,6 +1,36 @@
-# GemTavern RPEngine PWA
+<div align="center">
+  <a href="https://rpengine.gemtavern.com/">
+    <img src="./public/brand/app-icon.png" width="128" alt="GemTavern RPEngine app icon">
+  </a>
 
-An installable, game-neutral local character-response compute provider. A game integration hosts an authenticated loopback WebSocket endpoint and this PWA connects outbound. The integration supplies Character Card V2 data and event text; RPEngine owns prompt assembly, Gemma inference, Supertonic synthesis, and response streaming.
+  <h1>GemTavern RPEngine</h1>
+
+  <p><strong>A local-first character roleplay engine for games.</strong></p>
+
+  <p>
+    <a href="https://rpengine.gemtavern.com/"><img src="https://img.shields.io/badge/Launch-RPEngine-d8a64b?style=for-the-badge" alt="Launch RPEngine"></a>
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-8b6f47?style=for-the-badge" alt="AGPL-3.0 license"></a>
+    <img src="https://img.shields.io/badge/Inference-On--device-4f8f68?style=for-the-badge" alt="On-device inference">
+  </p>
+
+  <a href="https://rpengine.gemtavern.com/">
+    <img src="./public/brand/tavern-background.jpg" width="820" alt="GemTavern's tavern interior artwork">
+  </a>
+
+  <p><sub>Install the models once, then run character inference locally in your browser.</sub></p>
+</div>
+
+## Local AI for character-driven games
+
+RPEngine is an installable, game-neutral character-response compute provider. A game integration hosts an authenticated loopback WebSocket endpoint and this PWA connects outbound. The integration supplies Character Card V2 data and event text; RPEngine owns prompt assembly, Gemma inference, Moonshine speech recognition, Supertonic synthesis, and streamed responses.
+
+| Capability | What it provides |
+| --- | --- |
+| **Private by design** | Models and inference run on the user's device; prompts and audio are not sent to an inference service. |
+| **Game-neutral protocol** | Character Card V2 and protocol v3 let compatible games use the same local engine. |
+| **Multimodal streaming** | Text streams as it is generated, while sentence-level TTS overlaps synthesis and transmission. |
+| **Verified model storage** | Resumable origin downloads are SHA-256 verified and stored persistently in OPFS. |
+| **Rust/WASM core** | Request lifecycle, protocol policy, prompt logic, audio transforms, and other deterministic behavior live in the first-party WASM core. |
 
 The wire contract is `gemtavern.rp_engine` protocol v3. See [docs/protocol-v3.md](docs/protocol-v3.md).
 
