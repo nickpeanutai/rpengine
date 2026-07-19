@@ -5,7 +5,15 @@ export const FILE_MANIFEST_SCHEMA = 'gemtavern.rp_engine.file_transport';
 export const FILE_MANIFEST_VERSION = 1;
 export const ACTIVE_POLL_MS = 50;
 export const IDLE_POLL_MS = 250;
+export const TEXT_DELTA_BATCH_MS = 120;
 const STALE_MS = 24 * 60 * 60 * 1000;
+
+interface PendingTextDelta {
+  sessionId?: string;
+  payload: Record<string, unknown>;
+  delta: string;
+  timer: number;
+}
 
 interface MailboxManifest {
   schema: typeof FILE_MANIFEST_SCHEMA;
@@ -29,6 +37,9 @@ export class FileSystemMailboxAdapter implements TransportAdapter {
   private peerInstanceId = '';
   private audioExhausted = false;
   private readonly outgoing = new Map<string, string>();
+  private readonly pendingTextDeltas = new Map<string, PendingTextDelta>();
+  private readonly textBatchSequences = new Map<string, number>();
+  private lastWriteTimestamp = 0;
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(private root: FileSystemDirectoryHandle | undefined, private readonly events: TransportEvents) {}
@@ -57,6 +68,7 @@ export class FileSystemMailboxAdapter implements TransportAdapter {
       await this.cleanupStale();
       this.outgoing.clear();
       for (const [messageId, stem] of await recoverOutgoing(this.outbound)) this.outgoing.set(messageId, stem);
+      this.lastWriteTimestamp = latestStemTimestamp(await directoryNames(this.outbound));
       this.events.opened();
       this.schedule(0);
     } catch (error) { this.events.error(error instanceof Error ? error.message : String(error)); }
@@ -66,11 +78,47 @@ export class FileSystemMailboxAdapter implements TransportAdapter {
     this.connected = false;
     if (this.timer !== undefined) window.clearTimeout(this.timer);
     this.timer = undefined;
+    this.clearTextDeltas();
     if (notify) this.events.closed(1000, reason);
   }
 
   send(type: string, sessionId: string | undefined, payload: Record<string, unknown>) {
-    return this.enqueue(() => this.sendNow(type, sessionId, payload));
+    if (type === 'reply.text.delta') return this.bufferTextDelta(sessionId, payload);
+    return this.enqueue(async () => {
+      const requestId = typeof payload.requestId === 'string' ? payload.requestId : undefined;
+      if (requestId && isTextTerminal(type)) await this.flushTextDeltaNow(requestId);
+      const sent = await this.sendNow(type, sessionId, payload);
+      if (requestId && isTextTerminal(type)) this.textBatchSequences.delete(requestId);
+      return sent;
+    });
+  }
+
+  private bufferTextDelta(sessionId: string | undefined, payload: Record<string, unknown>) {
+    if (!this.connected) return false;
+    const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
+    const delta = typeof payload.delta === 'string' ? payload.delta : '';
+    if (!requestId || !delta) return this.enqueue(() => this.sendNow('reply.text.delta', sessionId, payload));
+    const pending = this.pendingTextDeltas.get(requestId);
+    if (pending) { pending.delta += delta; return true; }
+    const timer = window.setTimeout(() => { void this.enqueue(() => this.flushTextDeltaNow(requestId)); }, TEXT_DELTA_BATCH_MS);
+    this.pendingTextDeltas.set(requestId, { sessionId, payload: { ...payload }, delta, timer });
+    return true;
+  }
+
+  private async flushTextDeltaNow(requestId: string) {
+    const pending = this.pendingTextDeltas.get(requestId);
+    if (!pending) return true;
+    this.pendingTextDeltas.delete(requestId);
+    window.clearTimeout(pending.timer);
+    const sequence = this.textBatchSequences.get(requestId) ?? 0;
+    this.textBatchSequences.set(requestId, sequence + 1);
+    return this.sendNow('reply.text.delta', pending.sessionId, { ...pending.payload, sequence, delta: pending.delta });
+  }
+
+  private clearTextDeltas() {
+    for (const pending of this.pendingTextDeltas.values()) window.clearTimeout(pending.timer);
+    this.pendingTextDeltas.clear();
+    this.textBatchSequences.clear();
   }
 
   private async sendNow(type: string, sessionId: string | undefined, payload: Record<string, unknown>) {
@@ -78,7 +126,7 @@ export class FileSystemMailboxAdapter implements TransportAdapter {
     try {
       const raw = envelopeJSON(type, sessionId, payload);
       const envelope = JSON.parse(raw) as { messageId: string };
-      const stem = `${Date.now().toString().padStart(13, '0')}-${envelope.messageId}`;
+      const stem = this.nextStem(envelope.messageId);
       await writeImmutable(this.outbound, stem, raw);
       if (type === 'ack') window.setTimeout(() => { if (this.outbound) void removePair(this.outbound, stem); }, 2000);
       else this.outgoing.set(envelope.messageId, stem);
@@ -87,10 +135,15 @@ export class FileSystemMailboxAdapter implements TransportAdapter {
     } catch (error) { this.events.error(error instanceof Error ? error.message : String(error)); return false; }
   }
 
+  private nextStem(messageId: string) {
+    this.lastWriteTimestamp = Math.max(Date.now(), this.lastWriteTimestamp + 1);
+    return `${this.lastWriteTimestamp.toString().padStart(13, '0')}-${messageId}`;
+  }
+
   sendAudioSegment(segment: ReplyAudioSegment) {
     if (!this.manifest || !this.audio || this.audioExhausted) return false;
     if (this.nextSlot >= this.manifest.audio.slotCount) { this.audioExhausted = true; return false; }
-    return this.enqueue(() => this.sendAudioNow(segment)).catch(error => { this.events.error(error instanceof Error ? error.message : String(error)); return false; });
+    return this.enqueue(async () => { await this.flushTextDeltaNow(segment.requestId); return this.sendAudioNow(segment); }).catch(error => { this.events.error(error instanceof Error ? error.message : String(error)); return false; });
   }
 
   private async sendAudioNow(segment: ReplyAudioSegment) {
@@ -177,6 +230,8 @@ export class FileSystemMailboxAdapter implements TransportAdapter {
   }
 }
 
+function isTextTerminal(type: string) { return ['reply.text.completed', 'reply.completed', 'reply.cancelled', 'request.error'].includes(type); }
+
 async function readManifest(root: FileSystemDirectoryHandle): Promise<MailboxManifest> {
   const file = await (await root.getFileHandle('manifest.json')).getFile();
   const value = JSON.parse(await file.text()) as MailboxManifest;
@@ -205,6 +260,15 @@ async function directoryNames(directory: FileSystemDirectoryHandle) {
   const names: string[] = [];
   for await (const name of directory.keys()) names.push(name);
   return names;
+}
+
+function latestStemTimestamp(names: Iterable<string>) {
+  let latest = 0;
+  for (const name of names) {
+    const timestamp = Number(name.slice(0, 13));
+    if (Number.isFinite(timestamp)) latest = Math.max(latest, timestamp);
+  }
+  return latest;
 }
 
 export async function writeImmutable(directory: FileSystemDirectoryHandle, stem: string, raw: string) {

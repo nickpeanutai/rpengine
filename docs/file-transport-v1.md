@@ -27,6 +27,8 @@ The user must explicitly select the integration-owned mailbox directory. The sel
 
 Each immutable envelope is written as `<timestamp>-<messageId>.json`; the matching `.ready` file is created only after the JSON writer closes. Readers ignore unmarked JSON. RPEngine polls every 50 ms during activity and 250 ms while idle, removes consumed inbound files, removes acknowledged outbound files, and deletes mailbox files older than 24 hours.
 
+To avoid one filesystem write per generated token, file mode coalesces `reply.text.delta` payloads for up to 120 ms per request. Published batches use contiguous sequence numbers and preserve the original text order. Pending text is flushed only for the matching request before its completion, cancellation, error, or audio segment is published; unrelated envelopes do not force a text flush. This batching applies only to file transport; WebSocket delivery remains immediate.
+
 The file-mode `welcome` adds `peerInstanceId` and `nextAudioSlot`. Each completed TTS phrase becomes one mono PCM16 WAV and one `reply.audio.segment` envelope. A slot path is never reused during a `peerInstanceId`; `reply.audio.segment.consumed` restores a silent placeholder but does not make the path reusable. After all slots are used, the adapter reports `audio_slots_exhausted` and strips audio from later inbound requests until a new game process supplies a new peer identity.
 
 Snapshot card transfers may omit `targetHash`; RPEngine validates the complete Character Card V2 and returns its computed hash. Patch and reference transfers still require `targetHash`. `voice.capture.start` returns `voice.capture.transcript` only when `returnTranscript` is `true`.

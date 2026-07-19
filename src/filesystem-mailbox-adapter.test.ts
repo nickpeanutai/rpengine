@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
-import { ACTIVE_POLL_MS, FILE_MANIFEST_SCHEMA, FILE_MANIFEST_VERSION, IDLE_POLL_MS, pcm16Wav, readyStems, recoverOutgoing, writeImmutable } from './filesystem-mailbox-adapter';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ACTIVE_POLL_MS, FILE_MANIFEST_SCHEMA, FILE_MANIFEST_VERSION, FileSystemMailboxAdapter, IDLE_POLL_MS, pcm16Wav, readyStems, recoverOutgoing, TEXT_DELTA_BATCH_MS, writeImmutable } from './filesystem-mailbox-adapter';
+
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('filesystem mailbox primitives', () => {
   it('pins the manifest version and polling latency', () => {
@@ -7,6 +9,7 @@ describe('filesystem mailbox primitives', () => {
     expect(FILE_MANIFEST_VERSION).toBe(1);
     expect(ACTIVE_POLL_MS).toBe(50);
     expect(IDLE_POLL_MS).toBe(250);
+    expect(TEXT_DELTA_BATCH_MS).toBe(120);
   });
 
   it('writes a valid mono PCM16 WAV', () => {
@@ -61,4 +64,108 @@ describe('filesystem mailbox primitives', () => {
     expect(files.has('002-ack.ready')).toBe(false);
     expect(files.has('003-unready.json')).toBe(true);
   });
+
+  it('coalesces file-mode text deltas and flushes them before completion', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const directory = memoryDirectory();
+    const errors: string[] = [];
+    const adapter = new FileSystemMailboxAdapter(undefined, { opened() {}, message() {}, closed() {}, error: value => errors.push(value) });
+    Object.assign(adapter as unknown as Record<string, unknown>, { connected: true, outbound: directory.handle });
+
+    expect(adapter.send('reply.text.delta', 'session', { requestId: 'request-1', sequence: 0, delta: 'Hold' })).toBe(true);
+    expect(adapter.send('reply.text.delta', 'session', { requestId: 'request-1', sequence: 1, delta: ' on' })).toBe(true);
+    await vi.advanceTimersByTimeAsync(TEXT_DELTA_BATCH_MS - 1);
+    expect(envelopes(directory.files)).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await (adapter as any).writeChain;
+    expect(envelopes(directory.files)).toEqual([expect.objectContaining({ type: 'reply.text.delta', requestId: 'request-1', sequence: 0, delta: 'Hold on' })]);
+
+    adapter.send('reply.text.delta', 'session', { requestId: 'request-1', sequence: 2, delta: ' a second.' });
+    await adapter.send('reply.text.completed', 'session', { requestId: 'request-1', text: 'Hold on a second.' });
+    expect(envelopes(directory.files).slice(-2)).toEqual([
+      expect.objectContaining({ type: 'reply.text.delta', requestId: 'request-1', sequence: 1, delta: ' a second.' }),
+      expect.objectContaining({ type: 'reply.text.completed', requestId: 'request-1', text: 'Hold on a second.' }),
+    ]);
+    expect(errors).toEqual([]);
+    adapter.disconnect('test complete', false);
+  });
+
+  it('does not let buffered text overtake an earlier accepted message', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const directory = memoryDirectory();
+    const gate = deferred<void>();
+    const adapter = new FileSystemMailboxAdapter(undefined, { opened() {}, message() {}, closed() {}, error() {} });
+    Object.assign(adapter as unknown as Record<string, unknown>, { connected: true, outbound: directory.handle, writeChain: gate.promise });
+
+    const accepted = adapter.send('reply.accepted', 'session', { requestId: 'request-1' });
+    adapter.send('reply.text.delta', 'session', { requestId: 'request-1', sequence: 0, delta: 'Hello' });
+    gate.resolve();
+    await accepted;
+    expect(envelopes(directory.files)).toEqual([expect.objectContaining({ type: 'reply.accepted', requestId: 'request-1' })]);
+
+    await vi.advanceTimersByTimeAsync(TEXT_DELTA_BATCH_MS);
+    await (adapter as any).writeChain;
+    expect(envelopes(directory.files).map(envelope => envelope.type)).toEqual(['reply.accepted', 'reply.text.delta']);
+    adapter.disconnect('test complete', false);
+  });
+
+  it('does not prematurely flush text for capacity updates', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const directory = memoryDirectory();
+    const adapter = new FileSystemMailboxAdapter(undefined, { opened() {}, message() {}, closed() {}, error() {} });
+    Object.assign(adapter as unknown as Record<string, unknown>, { connected: true, outbound: directory.handle });
+
+    adapter.send('reply.text.delta', 'session', { requestId: 'request-1', sequence: 0, delta: 'Hello' });
+    await adapter.send('capacity.update', 'session', { queueDepth: 1 });
+    expect(envelopes(directory.files)).toEqual([expect.objectContaining({ type: 'capacity.update' })]);
+
+    await vi.advanceTimersByTimeAsync(TEXT_DELTA_BATCH_MS);
+    await (adapter as any).writeChain;
+    expect(envelopes(directory.files).map(envelope => envelope.type)).toEqual(['capacity.update', 'reply.text.delta']);
+    adapter.disconnect('test complete', false);
+  });
+
+  it('drops an unflushed text batch on disconnect', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const directory = memoryDirectory();
+    const adapter = new FileSystemMailboxAdapter(undefined, { opened() {}, message() {}, closed() {}, error() {} });
+    Object.assign(adapter as unknown as Record<string, unknown>, { connected: true, outbound: directory.handle });
+    adapter.send('reply.text.delta', 'session', { requestId: 'request-1', sequence: 0, delta: 'stale' });
+    adapter.disconnect('test disconnect', false);
+    await vi.advanceTimersByTimeAsync(TEXT_DELTA_BATCH_MS);
+    expect(envelopes(directory.files)).toEqual([]);
+  });
 });
+
+function memoryDirectory() {
+  const files = new Map<string, string>();
+  const handle = {
+    async *keys() { for (const name of files.keys()) yield name; },
+    async getFileHandle(name: string, options?: { create?: boolean }) {
+      if (!files.has(name) && !options?.create) throw new DOMException('missing', 'NotFoundError');
+      if (!files.has(name)) files.set(name, '');
+      return {
+        async getFile() { const value = files.get(name)!; return { size: new TextEncoder().encode(value).byteLength, async text() { return value; } }; },
+        async createWritable() {
+          return { async write(value: unknown) { files.set(name, typeof value === 'string' ? value : String(value)); }, async close() {} };
+        },
+      };
+    },
+    async removeEntry(name: string) { files.delete(name); },
+  } as unknown as FileSystemDirectoryHandle;
+  return { files, handle };
+}
+
+function envelopes(files: Map<string, string>) {
+  return Array.from(files.entries()).filter(([name]) => name.endsWith('.json')).sort(([left], [right]) => left.localeCompare(right)).map(([, raw]) => JSON.parse(raw));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>(complete => { resolve = complete; });
+  return { promise, resolve };
+}
