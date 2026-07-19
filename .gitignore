@@ -3,6 +3,7 @@ dist/
 public/wasm/
 public/ort-wasm/
 tools/mock-game/test-output/
+tools/mock-game/test-mailbox/
 reference/
 .tools/
 crates/rp-engine-core/target/

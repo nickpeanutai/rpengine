@@ -551,12 +551,15 @@ impl CoreSession {
             Err(message) => { self.diagnostic(effects, "error", "protocol", "Rejected game payload", Some(json!({ "message": message }))); self.send(effects, "request.error", json!({ "code":"invalid_payload", "message":message })); return; }
         };
         let message_id = envelope.get("messageId").and_then(Value::as_str).unwrap_or_default().to_string();
+        let message_type = envelope.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
         let duplicate = self.seen.contains(&message_id);
-        self.send(effects, "ack", if duplicate { json!({ "acknowledgedMessageId":message_id, "duplicate":true }) } else { json!({ "acknowledgedMessageId":message_id }) });
+        if message_type != "ack" {
+            self.send(effects, "ack", if duplicate { json!({ "acknowledgedMessageId":message_id, "duplicate":true }) } else { json!({ "acknowledgedMessageId":message_id }) });
+        }
         if duplicate { return; }
         self.seen.insert(message_id.clone()); self.seen_order.push_back(message_id);
         while self.seen_order.len() > 2000 { if let Some(old) = self.seen_order.pop_front() { self.seen.remove(&old); } }
-        match envelope.get("type").and_then(Value::as_str).unwrap_or_default() {
+        match message_type.as_str() {
             "welcome" => {
                 self.session_id = envelope.get("sessionId").and_then(Value::as_str).map(str::to_string);
                 self.connection_state = "connected".into(); self.reconnect_attempt = 0; self.cards.clear();
@@ -1075,6 +1078,17 @@ mod tests {
         core.service_started = true;
         let opened = dispatch(&mut core, json!({"type":"transportOpened"}));
         assert_eq!(effect(&opened, "transportSend")["payload"]["clientVersion"], "1.3.0-test");
+    }
+
+    #[test]
+    fn acknowledgement_envelopes_are_terminal() {
+        let mut core = ready_core();
+        let mut acknowledgement = envelope("ack", "terminal-ack");
+        acknowledgement.as_object_mut().unwrap().insert("acknowledgedMessageId".into(), json!("m-request"));
+        let handled = socket(&mut core, acknowledgement.clone());
+        assert!(!effects(&handled).iter().any(|value| value["type"] == "transportSend"), "an ack must not generate another ack: {handled}");
+        let duplicate = socket(&mut core, acknowledgement);
+        assert!(!effects(&duplicate).iter().any(|value| value["type"] == "transportSend"), "a duplicate ack must remain terminal: {duplicate}");
     }
 
     #[test]

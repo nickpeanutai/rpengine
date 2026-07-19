@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { request as httpRequest } from 'node:http';
 import { once } from 'node:events';
@@ -26,7 +26,7 @@ describe('mock-game browser voice capture', () => {
     const controlPort = await freePort(socketPort);
     outputDirectory = await mkdtemp(join(tmpdir(), 'rpengine-mock-game-'));
     server = spawn(process.execPath, ['tools/mock-game/server.mjs'], {
-      cwd: process.cwd(), env: { ...process.env, RPENGINE_PORT: String(socketPort), MOCK_GAME_CONTROL_PORT: String(controlPort), MOCK_GAME_OUTPUT_DIRECTORY: outputDirectory }, stdio: ['ignore', 'pipe', 'inherit'],
+      cwd: process.cwd(), env: { ...process.env, RPENGINE_PORT: String(socketPort), MOCK_GAME_CONTROL_PORT: String(controlPort), MOCK_GAME_OUTPUT_DIRECTORY: outputDirectory, MOCK_GAME_TRANSPORT: 'websocket' }, stdio: ['ignore', 'pipe', 'inherit'],
     });
     await outputContaining(server.stdout!, `Mock game control: http://127.0.0.1:${controlPort}`);
 
@@ -86,6 +86,75 @@ describe('mock-game browser voice capture', () => {
   });
 });
 
+describe('mock-game filesystem transport', () => {
+  it('creates a selectable mailbox and completes handshake, request, and audio consumption', async () => {
+    const controlPort = await freePort();
+    outputDirectory = await mkdtemp(join(tmpdir(), 'rpengine-mock-game-file-'));
+    const mailbox = join(outputDirectory, 'mailbox');
+    server = spawn(process.execPath, ['tools/mock-game/server.mjs'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        MOCK_GAME_CONTROL_PORT: String(controlPort),
+        MOCK_GAME_OUTPUT_DIRECTORY: outputDirectory,
+        MOCK_GAME_MAILBOX_DIRECTORY: mailbox,
+        MOCK_GAME_TRANSPORT: 'filesystem',
+      },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    await outputContaining(server.stdout!, `RPEngine filesystem mailbox: ${mailbox}`);
+
+    const manifest = JSON.parse(await readFile(join(mailbox, 'manifest.json'), 'utf8'));
+    expect(manifest).toMatchObject({
+      schema: 'gemtavern.rp_engine.file_transport', version: 1, integrationId: 'mock-game',
+      mailboxes: { integrationToEngine: 'integration-to-engine', engineToIntegration: 'engine-to-integration' },
+      audio: { format: 'wav_pcm_s16le', slotCount: 2048, channels: 1 },
+    });
+    expect((await readdir(join(mailbox, 'audio'))).filter(name => name.endsWith('.wav'))).toHaveLength(2048);
+
+    const toEngine = join(mailbox, 'integration-to-engine');
+    const fromEngine = join(mailbox, 'engine-to-integration');
+    const observed = new Set<string>();
+    await publishFileEnvelope(fromEngine, envelope('hello', { clientVersion: 'mock-test' }));
+    const welcome = await waitForMailboxEnvelope(toEngine, observed, value => value.type === 'welcome');
+    expect(welcome).toMatchObject({ type: 'welcome', serverVersion: 'mock-game-1.0', nextAudioSlot: 0 });
+    expect(String(welcome.peerInstanceId)).toMatch(/^mock-/);
+
+    await publishFileEnvelope(fromEngine, envelope('capacity.update', {
+      sessionId: welcome.sessionId, acceptingRequests: true, queueDepth: 0, queueLimit: 20,
+    }));
+    await waitForState(controlPort, value => value.connected === true && value.capacity.acceptingRequests === true);
+
+    const requestResponse = await post(controlPort, '/api/request', { ...input(), eventText: 'Hello from the filesystem test.' });
+    const request = await waitForMailboxEnvelope(toEngine, observed, value => value.type === 'reply.request');
+    expect(request).toMatchObject({ type: 'reply.request', requestId: requestResponse.requestId, event: { text: 'Hello from the filesystem test.' } });
+    expect(() => decode_envelope(JSON.stringify(request))).not.toThrow();
+
+    const segmentBytes = Buffer.from('RIFFmock-wave');
+    await writeFile(join(mailbox, 'audio', 'slot_0000.wav'), segmentBytes);
+    await publishFileEnvelope(fromEngine, envelope('reply.audio.segment', {
+      sessionId: welcome.sessionId,
+      requestId: request.requestId,
+      segmentSequence: 0,
+      spokenText: 'Hello.',
+      slotIndex: 0,
+      path: 'audio/slot_0000.wav',
+      format: 'wav_pcm_s16le',
+      sampleRate: 44100,
+      channels: 1,
+      durationSeconds: 0.1,
+      byteLength: segmentBytes.length,
+      peerInstanceId: welcome.peerInstanceId,
+    }));
+    const consumed = await waitForMailboxEnvelope(toEngine, observed, value => value.type === 'reply.audio.segment.consumed');
+    expect(consumed).toMatchObject({ requestId: request.requestId, segmentSequence: 0, slotIndex: 0, peerInstanceId: welcome.peerInstanceId });
+    expect(await readFile(join(outputDirectory, `${request.requestId}-segment-0000.wav`))).toEqual(segmentBytes);
+
+    await publishFileEnvelope(fromEngine, envelope('reply.completed', { sessionId: welcome.sessionId, requestId: request.requestId }));
+    await waitForState(controlPort, value => value.activeRequestId === undefined);
+  });
+});
+
 function input() {
   return { characterName: 'Ari', playerName: 'Morgan', description: 'Station engineer', personality: 'Calm', scenario: 'A test', transferMode: 'snapshot', outputMode: 'text', language: 'en', voiceId: 'F4' };
 }
@@ -141,6 +210,28 @@ async function outputContaining(stream: NodeJS.ReadableStream, expected: string)
     stream.once('error', reject);
     stream.once('end', () => { if (!resolved) reject(new Error(`Mock game exited before printing: ${expected}`)); });
   });
+}
+
+async function publishFileEnvelope(directory: string, value: Record<string, unknown>) {
+  const stem = `${Date.now().toString().padStart(13, '0')}-${value.messageId}`;
+  await writeFile(join(directory, `${stem}.json`), JSON.stringify(value), { flag: 'wx' });
+  await writeFile(join(directory, `${stem}.ready`), '', { flag: 'wx' });
+}
+
+async function waitForMailboxEnvelope(directory: string, observed: Set<string>, predicate: (value: Record<string, any>) => boolean) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const markers = (await readdir(directory)).filter(name => name.endsWith('.ready')).sort();
+    for (const marker of markers) {
+      const stem = marker.slice(0, -6);
+      if (observed.has(stem)) continue;
+      observed.add(stem);
+      const value = JSON.parse(await readFile(join(directory, `${stem}.json`), 'utf8')) as Record<string, any>;
+      if (predicate(value)) return value;
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error('Timed out waiting for a filesystem mailbox envelope.');
 }
 
 async function freePort(excluded?: number) {

@@ -61,7 +61,7 @@ project-local `wasm-bindgen` CLI; it does not modify the global Rust toolchain.
 
 For a local integration test, keep this server running and open RPEngine from the game adapter.
 
-To test without launching a game, stop RimWorld and run `npm run mock-game`, then open `http://127.0.0.1:38472`. The mock adapter hosts the real loopback protocol endpoint, supports snapshot/patch/reference requests, text and voice output, cancellation, resync, and saves returned PCM audio as WAV files under `tools/mock-game/test-output`. Browser microphone tests also save the finalized 16 kHz recording as `<requestId>-microphone.wav` and Moonshine's recognized text as `<requestId>-moonshine.txt` in that directory.
+To test without launching a game, run `npm run mock-game`, then open `http://127.0.0.1:38472`. The mock adapter supports both the WebSocket endpoint and a repository-local filesystem mailbox at `tools/mock-game/test-mailbox`; its UI shows the absolute folder to select in RPEngine Settings. Set `MOCK_GAME_TRANSPORT=websocket` or `MOCK_GAME_TRANSPORT=filesystem` to start only one transport (the default is `both`). The adapter supports snapshot/patch/reference requests, text and voice output, cancellation, resync, and saves returned audio as WAV files under `tools/mock-game/test-output`. Browser microphone tests also save the finalized 16 kHz recording as `<requestId>-microphone.wav` and Moonshine's recognized text as `<requestId>-moonshine.txt` in that directory.
 
 Production must serve the isolation headers in `public/_headers`. The service worker caches the app shell only; model data never enters the service-worker cache.
 

@@ -3,8 +3,19 @@
   <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RPEngine Mock Game</title><link rel="stylesheet" href="/styles.css"></head>
   <body>
     <main>
-      <header><div><p class="eyebrow">Protocol v3 test adapter</p><h1>RPEngine Mock Game</h1><p>Exercise the local compute provider without launching RimWorld.</p></div><span id="status">Disconnected</span></header>
-      <section class="panel connection"><div><h2>1. Connect RPEngine</h2><p id="pairingDetail">Open the PWA on the same loopback port.</p></div><div><button id="openPwa">Open local PWA</button></div></section>
+      <header><div><p class="eyebrow">Protocol v3 test adapter</p><h1>RPEngine Mock Game</h1><p>Exercise the local compute provider without launching a game.</p></div><span id="status">Disconnected</span></header>
+      <section class="panel connection">
+        <div class="connection-copy">
+          <h2>1. Connect RPEngine</h2>
+          <p id="pairingDetail">Open the PWA and select a transport.</p>
+          <div id="fileSetup" class="file-setup" hidden>
+            <strong>Filesystem mailbox</strong>
+            <p>In RPEngine Settings, select <b>Filesystem mailbox</b>, choose this folder, then start RPEngine:</p>
+            <code id="mailboxDirectory"></code>
+          </div>
+        </div>
+        <div class="connection-actions"><button id="copyMailbox" class="secondary" hidden>Copy mailbox path</button><button id="openPwa">Open local PWA</button></div>
+      </section>
       <section class="panel">
         <h2>2. Character and event</h2>
         <div class="grid">

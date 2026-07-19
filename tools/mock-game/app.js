@@ -14,10 +14,14 @@ async function refresh() {
 }
 
 function render() {
-  $('#status').textContent = state.connected ? `Connected · queue ${state.capacity.queueDepth}/${state.capacity.queueLimit}` : 'Disconnected';
+  const transport = state.activeTransport === 'filesystem' ? 'filesystem' : state.activeTransport === 'websocket' ? 'WebSocket' : '';
+  $('#status').textContent = state.connected ? `Connected via ${transport} · queue ${state.capacity.queueDepth}/${state.capacity.queueLimit}` : 'Disconnected';
   $('#status').className = state.connected ? 'connected' : '';
-  $('#pairingDetail').textContent = state.connected ? `Connected session ${state.sessionId}` : `Waiting on port ${state.socketPort}.`;
+  $('#pairingDetail').textContent = state.connected ? `Connected session ${state.sessionId}` : state.fileTransportEnabled ? 'Waiting for a filesystem or WebSocket handshake.' : `Waiting on WebSocket port ${state.socketPort}.`;
   $('#openPwa').disabled = !state.clientUrl;
+  $('#fileSetup').hidden = !state.fileTransportEnabled;
+  $('#copyMailbox').hidden = !state.fileTransportEnabled;
+  $('#mailboxDirectory').textContent = state.mailboxDirectory || '';
   $('#send').disabled = !state.connected || !state.capacity.acceptingRequests;
   $('#cancel').disabled = !state.activeRequestId;
   renderVoiceCapture();
@@ -84,6 +88,13 @@ async function audioInput(file, language) {
 }
 
 $('#openPwa').addEventListener('click', () => { if (state?.clientUrl) window.open(state.clientUrl, '_blank', 'noopener'); });
+$('#copyMailbox').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(state?.mailboxDirectory || '');
+    $('#copyMailbox').textContent = 'Copied';
+    window.setTimeout(() => { $('#copyMailbox').textContent = 'Copy mailbox path'; }, 1200);
+  } catch (error) { showError(error); }
+});
 $('#send').addEventListener('click', async () => { try { $('#send').disabled = true; await api('/api/request', await form()); await refresh(); } catch (error) { showError(error); } });
 $('#cancel').addEventListener('click', async () => { try { await api('/api/cancel', {}); await refresh(); } catch (error) { showError(error); } });
 $('#startVoice').addEventListener('click', async () => { try { $('#startVoice').disabled = true; await api('/api/voice/start', commonForm()); await refresh(); } catch (error) { showError(error); await refresh(); } });

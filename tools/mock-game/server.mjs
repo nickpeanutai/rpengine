@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { copyFile, mkdir, open, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 
@@ -11,6 +11,16 @@ const protocol = 'gemtavern.rp_engine';
 const protocolVersion = 3;
 const socketPort = Number(process.env.RPENGINE_PORT ?? 38471);
 const controlPort = Number(process.env.MOCK_GAME_CONTROL_PORT ?? 38472);
+const transportMode = String(process.env.MOCK_GAME_TRANSPORT ?? 'both').toLowerCase();
+const mailboxDirectory = process.env.MOCK_GAME_MAILBOX_DIRECTORY ? resolve(process.env.MOCK_GAME_MAILBOX_DIRECTORY) : join(root, 'test-mailbox');
+const fileTransportEnabled = transportMode === 'both' || transportMode === 'filesystem';
+const websocketEnabled = transportMode === 'both' || transportMode === 'websocket';
+const integrationToEngine = join(mailboxDirectory, 'integration-to-engine');
+const engineToIntegration = join(mailboxDirectory, 'engine-to-integration');
+const mailboxAudioDirectory = join(mailboxDirectory, 'audio');
+const filePeerInstanceId = `mock-${randomUUID()}`;
+const audioSlotCount = 2048;
+const maxMessageBytes = 8 * 1024 * 1024;
 const allowedOrigins = new Set([
   'http://127.0.0.1:5173',
   'https://rpengine.gemtavern.com',
@@ -18,9 +28,17 @@ const allowedOrigins = new Set([
 ]);
 if (!Number.isInteger(socketPort) || socketPort < 1024 || socketPort > 65535) throw new Error('RPENGINE_PORT must be between 1024 and 65535.');
 if (!Number.isInteger(controlPort) || controlPort < 1024 || controlPort > 65535) throw new Error('MOCK_GAME_CONTROL_PORT must be between 1024 and 65535.');
+if (!['both', 'filesystem', 'websocket'].includes(transportMode)) throw new Error('MOCK_GAME_TRANSPORT must be both, filesystem, or websocket.');
 
 let sessionId;
 let socket;
+let activeTransport;
+let fileConnected = false;
+let filePollTimer;
+let fileWriteChain = Promise.resolve();
+let nextAudioSlot = 0;
+const seenFileMessages = new Set();
+const seenFileMessageOrder = [];
 let lastCard;
 let lastCardHash;
 let activeRequestId;
@@ -45,11 +63,12 @@ function log(direction, type, details) {
   if (events.length > 500) events.splice(0, events.length - 500);
   process.stdout.write(`[${direction}] ${type}${details ? ` ${JSON.stringify(details)}` : ''}\n`);
 }
-function send(type, payload = {}) {
-  if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('RPEngine PWA is not connected.');
+async function send(type, payload = {}) {
   const message = envelope(type, payload);
-  socket.send(JSON.stringify(message));
-  log('game → pwa', type, payload);
+  if (activeTransport === 'filesystem' && fileConnected) await writeMailboxEnvelope(message);
+  else if (activeTransport === 'websocket' && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+  else throw new Error('RPEngine PWA is not connected.');
+  log(`game → pwa (${activeTransport})`, type, payload);
   return message;
 }
 
@@ -96,7 +115,7 @@ function createTransfer(mode, card) {
   return { descriptor: { format: 'chara_card_v2', mode: 'patch', patch: diff(lastCard, card), baseHash: lastCardHash, targetHash }, targetHash };
 }
 
-function submitReply(input, forcedSnapshot = false, existing) {
+async function submitReply(input, forcedSnapshot = false, existing) {
   const card = existing?.card ?? buildCard(input);
   const transfer = forcedSnapshot
     ? { descriptor: { format: 'chara_card_v2', mode: 'snapshot', snapshot: card, targetHash: hash(card) }, targetHash: hash(card) }
@@ -118,11 +137,11 @@ function submitReply(input, forcedSnapshot = false, existing) {
   lastCard = structuredClone(card);
   lastCardHash = transfer.targetHash;
   activeRequestId = requestId;
-  send('reply.request', request);
+  await send('reply.request', request);
   return requestId;
 }
 
-function submitVoiceCapture(input, forcedSnapshot = false, existing) {
+async function submitVoiceCapture(input, forcedSnapshot = false, existing) {
   if (activeRequestId) throw new Error('Finish or cancel the active request before starting another voice capture.');
   const card = existing?.card ?? buildCard(input);
   const transfer = forcedSnapshot
@@ -143,16 +162,16 @@ function submitVoiceCapture(input, forcedSnapshot = false, existing) {
   lastCardHash = transfer.targetHash;
   activeRequestId = requestId;
   voiceCapture = { requestId, state: 'requested', seconds: 0, peak: 0, rms: 0, autoEndEnabled: false, message: 'Waiting for RPEngine to start browser microphone capture.' };
-  send('voice.capture.start', request);
+  await send('voice.capture.start', request);
   return requestId;
 }
 
 async function receive(raw) {
   let message;
-  try { message = JSON.parse(String(raw)); } catch { return log('pwa → game', 'invalid_json'); }
-  if (message.protocol !== protocol || message.protocolVersion !== protocolVersion) return log('pwa → game', 'protocol_rejected', message);
+  try { message = JSON.parse(String(raw)); } catch { return log(`pwa → game (${activeTransport})`, 'invalid_json'); }
+  if (message.protocol !== protocol || message.protocolVersion !== protocolVersion) return log(`pwa → game (${activeTransport})`, 'protocol_rejected', message);
   const isAudioChunk = typeof message.type === 'string' && message.type.endsWith('.audio.chunk');
-  log('pwa → game', message.type, isAudioChunk ? { requestId: message.requestId, sequence: message.sequence, segmentSequence: message.segmentSequence, segmentChunkSequence: message.segmentChunkSequence, bytes: Buffer.from(message.data || '', 'base64').length } : message);
+  log(`pwa → game (${activeTransport})`, message.type, isAudioChunk ? { requestId: message.requestId, sequence: message.sequence, segmentSequence: message.segmentSequence, segmentChunkSequence: message.segmentChunkSequence, bytes: Buffer.from(message.data || '', 'base64').length } : message);
   if (message.type === 'capacity.update') capacity = { acceptingRequests: Boolean(message.acceptingRequests), queueDepth: Number(message.queueDepth), queueLimit: Number(message.queueLimit) };
   if (message.type === 'voice.capture.level' && voiceCapture?.requestId === message.requestId) {
     voiceCapture = { ...voiceCapture, seconds: Number(message.seconds) || 0, peak: Number(message.peak) || 0, rms: Number(message.rms) || 0 };
@@ -163,14 +182,15 @@ async function receive(raw) {
   if (message.type === 'reply.audio.start') audio.set(message.requestId, { sampleRate: message.sampleRate, chunks: new Map() });
   if (message.type === 'reply.audio.chunk') audio.get(message.requestId)?.chunks.set(message.sequence, Buffer.from(message.data, 'base64'));
   if (message.type === 'reply.audio.completed') await saveAudio(message.requestId, message);
+  if (message.type === 'reply.audio.segment') await saveFileAudioSegment(message);
   if (message.type === 'voice.capture.audio.start') microphoneAudio.set(message.requestId, { sampleRate: message.sampleRate, chunks: new Map() });
   if (message.type === 'voice.capture.audio.chunk') microphoneAudio.get(message.requestId)?.chunks.set(message.sequence, Buffer.from(message.data, 'base64'));
   if (message.type === 'voice.capture.audio.completed') await saveMicrophoneAudio(message.requestId, message);
   if (message.type === 'voice.capture.transcript') await saveMoonshineTranscript(message.requestId, message);
   if (message.type === 'request.error' && message.code === 'card_resync_required') {
     const request = pending.get(message.requestId);
-    if (request?.kind === 'voice') { activeRequestId = undefined; submitVoiceCapture(request.input, true, request); }
-    else if (request) submitReply(request.input, true, request);
+    if (request?.kind === 'voice') { activeRequestId = undefined; await submitVoiceCapture(request.input, true, request); }
+    else if (request) await submitReply(request.input, true, request);
   }
   if (['reply.completed', 'reply.cancelled'].includes(message.type)) {
     pending.delete(message.requestId);
@@ -188,6 +208,27 @@ async function receive(raw) {
     if (activeRequestId === message.requestId) activeRequestId = undefined;
     voiceCapture = { ...voiceCapture, state: 'error', message: String(message.message || 'Voice capture failed.') };
   }
+}
+
+async function saveFileAudioSegment(message) {
+  if (activeTransport !== 'filesystem') return;
+  const relativePath = String(message.path || '');
+  const source = resolve(mailboxDirectory, relativePath);
+  const fromRoot = relative(mailboxAudioDirectory, source);
+  if (!relativePath || fromRoot.startsWith('..') || fromRoot.includes(`..${sep}`) || resolve(source) === resolve(mailboxAudioDirectory)) {
+    log('mock', 'audio_segment_invalid_path', { requestId: message.requestId, path: relativePath });
+    return;
+  }
+  await mkdir(outputDirectory, { recursive: true });
+  const destination = join(outputDirectory, `${message.requestId}-segment-${String(message.segmentSequence ?? 0).padStart(4, '0')}.wav`);
+  await copyFile(source, destination);
+  log('mock', 'audio_segment_saved', { requestId: message.requestId, segmentSequence: message.segmentSequence, path: destination, spokenText: message.spokenText });
+  await send('reply.audio.segment.consumed', {
+    requestId: message.requestId,
+    segmentSequence: message.segmentSequence,
+    slotIndex: message.slotIndex,
+    peerInstanceId: filePeerInstanceId,
+  });
 }
 
 async function saveAudio(requestId, completed) {
@@ -251,37 +292,142 @@ function wavFile(pcm, sampleRate) {
   return Buffer.concat([header, pcm]);
 }
 
+async function initializeFileMailbox() {
+  await Promise.all([
+    mkdir(integrationToEngine, { recursive: true }),
+    mkdir(engineToIntegration, { recursive: true }),
+    mkdir(mailboxAudioDirectory, { recursive: true }),
+  ]);
+  const manifest = {
+    schema: 'gemtavern.rp_engine.file_transport',
+    version: 1,
+    integrationId: 'mock-game',
+    displayName: 'RPEngine Mock Game',
+    mailboxes: { integrationToEngine: 'integration-to-engine', engineToIntegration: 'engine-to-integration' },
+    audio: { format: 'wav_pcm_s16le', directory: 'audio', slotPattern: 'slot_%04d.wav', slotCount: audioSlotCount, sampleRate: 44100, channels: 1 },
+  };
+  await writeFile(join(mailboxDirectory, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  const silence = wavFile(Buffer.alloc(2), manifest.audio.sampleRate);
+  for (let start = 0; start < audioSlotCount; start += 128) {
+    await Promise.all(Array.from({ length: Math.min(128, audioSlotCount - start) }, async (_, offset) => {
+      const slot = String(start + offset).padStart(4, '0');
+      await writeFile(join(mailboxAudioDirectory, `slot_${slot}.wav`), silence, { flag: 'wx' }).catch(error => {
+        if (error?.code !== 'EEXIST') throw error;
+      });
+    }));
+  }
+}
+
+function writeMailboxEnvelope(message) {
+  const operation = fileWriteChain.then(async () => {
+    const raw = JSON.stringify(message);
+    if (Buffer.byteLength(raw) > maxMessageBytes) throw new Error('RPEngine message exceeds 8 MiB.');
+    const stem = `${Date.now().toString().padStart(13, '0')}-${message.messageId}`;
+    const jsonPath = join(integrationToEngine, `${stem}.json`);
+    const readyPath = join(integrationToEngine, `${stem}.ready`);
+    const json = await open(jsonPath, 'wx');
+    try { await json.writeFile(raw, 'utf8'); } finally { await json.close(); }
+    const ready = await open(readyPath, 'wx');
+    await ready.close();
+  });
+  fileWriteChain = operation.catch(() => undefined);
+  return operation;
+}
+
+function scheduleFilePoll(delay = 50) {
+  if (!fileTransportEnabled) return;
+  clearTimeout(filePollTimer);
+  filePollTimer = setTimeout(() => void pollFileMailbox(), delay);
+}
+
+async function pollFileMailbox() {
+  try {
+    const names = await readdir(engineToIntegration);
+    const stems = names.filter(name => name.endsWith('.ready')).map(name => name.slice(0, -6)).sort();
+    for (const stem of stems) await consumeFileEnvelope(stem);
+  } catch (error) {
+    log('mock', 'file_poll_error', { message: error instanceof Error ? error.message : String(error) });
+  } finally { scheduleFilePoll(fileConnected ? 50 : 250); }
+}
+
+async function consumeFileEnvelope(stem) {
+  const path = join(engineToIntegration, `${stem}.json`);
+  let info;
+  try { info = await stat(path); } catch { return; }
+  if (info.size > maxMessageBytes) {
+    log('pwa → game (filesystem)', 'message_rejected', { reason: 'Message exceeds 8 MiB.', stem });
+    return;
+  }
+  let message;
+  let raw;
+  try {
+    raw = await readFile(path, 'utf8');
+    message = JSON.parse(raw);
+  } catch (error) {
+    log('pwa → game (filesystem)', 'invalid_json', { stem, message: error instanceof Error ? error.message : String(error) });
+    return;
+  }
+  if (message.protocol !== protocol || message.protocolVersion !== protocolVersion || typeof message.messageId !== 'string') {
+    log('pwa → game (filesystem)', 'protocol_rejected', message);
+    return;
+  }
+  const duplicate = seenFileMessages.has(message.messageId);
+  if (!duplicate) {
+    seenFileMessages.add(message.messageId);
+    seenFileMessageOrder.push(message.messageId);
+    if (seenFileMessageOrder.length > 2000) seenFileMessages.delete(seenFileMessageOrder.shift());
+  }
+  if (message.type === 'hello' && !duplicate) {
+    activeTransport = 'filesystem';
+    fileConnected = true;
+    sessionId = `mock-${filePeerInstanceId}`;
+    lastCard = undefined;
+    lastCardHash = undefined;
+    capacity = { acceptingRequests: false, queueDepth: 0, queueLimit: 20 };
+  }
+  if (!fileConnected) return;
+  if (message.type !== 'ack') await send('ack', { acknowledgedMessageId: message.messageId, ...(duplicate ? { duplicate: true } : {}) });
+  if (duplicate) return;
+  if (message.type === 'hello') {
+    log('pwa → game (filesystem)', 'hello', message);
+    await send('welcome', { serverVersion: 'mock-game-1.0', peerInstanceId: filePeerInstanceId, nextAudioSlot });
+    return;
+  }
+  if (message.type === 'reply.audio.segment') nextAudioSlot = Math.max(nextAudioSlot, Number(message.slotIndex) + 1 || 0);
+  await receive(raw);
+}
+
 const httpServer = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://127.0.0.1:${controlPort}`);
     if (url.pathname === '/api/state') return json(response, 200, state());
     if (url.pathname === '/api/request' && request.method === 'POST') {
       const input = await body(request);
-      return json(response, 200, { requestId: submitReply(input), state: state() });
+      return json(response, 200, { requestId: await submitReply(input), state: state() });
     }
     if (url.pathname === '/api/cancel' && request.method === 'POST') {
       const input = await body(request); const requestId = input.requestId || activeRequestId;
       if (!requestId) throw new Error('There is no active request to cancel.');
-      send('request.cancel', { requestId }); return json(response, 200, { requestId });
+      await send('request.cancel', { requestId }); return json(response, 200, { requestId });
     }
     if (url.pathname === '/api/voice/start' && request.method === 'POST') {
-      if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('RPEngine PWA is not connected.');
+      if (!isConnected()) throw new Error('RPEngine PWA is not connected.');
       if (!capacity.acceptingRequests) throw new Error('RPEngine is not ready to accept voice capture requests. Start RPEngine and enable its microphone first.');
       const input = await body(request);
-      const requestId = submitVoiceCapture(input);
+      const requestId = await submitVoiceCapture(input);
       return json(response, 200, { requestId, state: state() });
     }
     if (url.pathname === '/api/voice/stop' && request.method === 'POST') {
       const input = await body(request); const requestId = input.requestId || voiceCapture?.requestId;
       if (!requestId || activeRequestId !== requestId) throw new Error('There is no active voice capture to stop.');
-      send('voice.capture.stop', { requestId });
+      await send('voice.capture.stop', { requestId });
       voiceCapture = { ...voiceCapture, state: 'stopping', message: 'Waiting for RPEngine to finalize the recording.' };
       return json(response, 200, { requestId, state: state() });
     }
     if (url.pathname === '/api/voice/cancel' && request.method === 'POST') {
       const input = await body(request); const requestId = input.requestId || voiceCapture?.requestId;
       if (!requestId || activeRequestId !== requestId) throw new Error('There is no active voice capture to cancel.');
-      send('voice.capture.cancel', { requestId });
+      await send('voice.capture.cancel', { requestId });
       return json(response, 200, { requestId, state: state() });
     }
     const file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
@@ -292,30 +438,49 @@ const httpServer = createServer(async (request, response) => {
   } catch (error) { json(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
 });
 
-const wsServer = new WebSocketServer({ host: '127.0.0.1', port: socketPort, path: '/rp-engine/socket', maxPayload: 8 * 1024 * 1024 });
-wsServer.on('connection', (candidate, request) => {
+const wsServer = websocketEnabled ? new WebSocketServer({ host: '127.0.0.1', port: socketPort, path: '/rp-engine/socket', maxPayload: maxMessageBytes }) : undefined;
+wsServer?.on('connection', (candidate, request) => {
   if (!allowedOrigins.has(request.headers.origin || '')) { candidate.close(1008, 'Origin rejected'); return; }
-  candidate.once('message', raw => {
+  candidate.once('message', async raw => {
     let hello;
     try { hello = JSON.parse(String(raw)); } catch { candidate.close(1008, 'Invalid hello'); return; }
     if (hello.protocol !== protocol || hello.protocolVersion !== 3 || hello.type !== 'hello') { candidate.close(1008, 'Invalid hello'); return; }
     sessionId = randomUUID();
-    socket?.close(3000, 'Superseded'); socket = candidate;
-    send('welcome', { serverVersion: 'mock-game-1.0' });
+    socket?.close(3000, 'Superseded'); socket = candidate; activeTransport = 'websocket';
+    await send('welcome', { serverVersion: 'mock-game-1.0' });
     candidate.on('message', receive);
-    candidate.on('close', () => { if (socket === candidate) { socket = undefined; sessionId = undefined; lastCard = undefined; lastCardHash = undefined; } });
+    candidate.on('close', () => { if (socket === candidate) { socket = undefined; if (activeTransport === 'websocket') { activeTransport = undefined; sessionId = undefined; lastCard = undefined; lastCardHash = undefined; } } });
   });
 });
 
+function isConnected() {
+  return activeTransport === 'filesystem' ? fileConnected : activeTransport === 'websocket' && socket?.readyState === WebSocket.OPEN;
+}
 function state() {
-  return { connected: socket?.readyState === WebSocket.OPEN, sessionId, capacity, activeRequestId, voiceCapture, clientUrl: `http://127.0.0.1:5173/#port=${socketPort}`, socketPort, lastCardHash, events: events.slice(-100) };
+  return {
+    connected: isConnected(), activeTransport, transportMode, sessionId, capacity, activeRequestId, voiceCapture,
+    clientUrl: `http://127.0.0.1:5173/#port=${socketPort}`, socketPort,
+    fileTransportEnabled, mailboxDirectory: fileTransportEnabled ? mailboxDirectory : undefined,
+    filePeerInstanceId: fileTransportEnabled ? filePeerInstanceId : undefined,
+    nextAudioSlot, lastCardHash, events: events.slice(-100),
+  };
 }
 async function body(request) { const chunks = []; for await (const chunk of request) chunks.push(chunk); return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
 function json(response, status, value) { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value)); }
 
+if (fileTransportEnabled) {
+  await initializeFileMailbox();
+  scheduleFilePoll(0);
+}
+
 httpServer.listen(controlPort, '127.0.0.1', () => {
   process.stdout.write(`Mock game control: http://127.0.0.1:${controlPort}\n`);
-  process.stdout.write(`RPEngine socket: ws://127.0.0.1:${socketPort}/rp-engine/socket\n`);
+  if (websocketEnabled) process.stdout.write(`RPEngine socket: ws://127.0.0.1:${socketPort}/rp-engine/socket\n`);
+  if (fileTransportEnabled) process.stdout.write(`RPEngine filesystem mailbox: ${mailboxDirectory}\n`);
 });
 
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { wsServer.close(); httpServer.close(() => process.exit(0)); });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
+  clearTimeout(filePollTimer);
+  wsServer?.close();
+  httpServer.close(() => process.exit(0));
+});
