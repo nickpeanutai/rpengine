@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { copyFile, mkdir, open, readFile, readdir, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 
@@ -39,10 +39,12 @@ let fileWriteChain = Promise.resolve();
 let nextAudioSlot = 0;
 const seenFileMessages = new Set();
 const seenFileMessageOrder = [];
+const fileAcknowledgedAt = new Map();
 let lastCard;
 let lastCardHash;
 let activeRequestId;
 let voiceCapture;
+let latestReply;
 let capacity = { acceptingRequests: false, queueDepth: 0, queueLimit: 20 };
 const pending = new Map();
 const audio = new Map();
@@ -134,6 +136,10 @@ async function submitReply(input, forcedSnapshot = false, existing) {
     player: { displayName: input.playerName || 'Player' }, card: transfer.descriptor,
   };
   pending.set(requestId, { kind: 'reply', requestId, eventId, input, card, request });
+  latestReply = {
+    requestId, characterName: card.data.name, inputText: String(input.eventText || ''), status: 'generating',
+    text: '', textParts: [], audioSegments: [], startedAt: new Date().toISOString(),
+  };
   lastCard = structuredClone(card);
   lastCardHash = transfer.targetHash;
   activeRequestId = requestId;
@@ -158,6 +164,10 @@ async function submitVoiceCapture(input, forcedSnapshot = false, existing) {
     debug: { echoCapturedAudio: true, echoTranscript: true },
   };
   pending.set(requestId, { kind: 'voice', requestId, eventId, input, card, request });
+  latestReply = {
+    requestId, characterName: card.data.name, inputText: '(browser microphone capture)', status: 'capturing',
+    text: '', textParts: [], audioSegments: [], startedAt: new Date().toISOString(),
+  };
   lastCard = structuredClone(card);
   lastCardHash = transfer.targetHash;
   activeRequestId = requestId;
@@ -173,6 +183,16 @@ async function receive(raw) {
   const isAudioChunk = typeof message.type === 'string' && message.type.endsWith('.audio.chunk');
   log(`pwa → game (${activeTransport})`, message.type, isAudioChunk ? { requestId: message.requestId, sequence: message.sequence, segmentSequence: message.segmentSequence, segmentChunkSequence: message.segmentChunkSequence, bytes: Buffer.from(message.data || '', 'base64').length } : message);
   if (message.type === 'capacity.update') capacity = { acceptingRequests: Boolean(message.acceptingRequests), queueDepth: Number(message.queueDepth), queueLimit: Number(message.queueLimit) };
+  if (latestReply?.requestId === message.requestId && message.type === 'reply.text.delta') {
+    latestReply.textParts[Number(message.sequence) || 0] = String(message.delta || '');
+    latestReply.text = latestReply.textParts.join('');
+    latestReply.status = 'streaming text';
+  }
+  if (latestReply?.requestId === message.requestId && message.type === 'reply.text.completed') {
+    latestReply.text = String(message.text || latestReply.text);
+    latestReply.status = 'generating audio';
+    latestReply.textCompletedAt = new Date().toISOString();
+  }
   if (message.type === 'voice.capture.level' && voiceCapture?.requestId === message.requestId) {
     voiceCapture = { ...voiceCapture, seconds: Number(message.seconds) || 0, peak: Number(message.peak) || 0, rms: Number(message.rms) || 0 };
   }
@@ -195,6 +215,10 @@ async function receive(raw) {
   if (['reply.completed', 'reply.cancelled'].includes(message.type)) {
     pending.delete(message.requestId);
     if (activeRequestId === message.requestId) activeRequestId = undefined;
+    if (latestReply?.requestId === message.requestId) {
+      latestReply.status = message.type === 'reply.completed' ? 'completed' : 'cancelled';
+      latestReply.completedAt = new Date().toISOString();
+    }
     if (voiceCapture?.requestId === message.requestId) {
       voiceCapture = {
         ...voiceCapture,
@@ -207,6 +231,10 @@ async function receive(raw) {
     pending.delete(message.requestId);
     if (activeRequestId === message.requestId) activeRequestId = undefined;
     voiceCapture = { ...voiceCapture, state: 'error', message: String(message.message || 'Voice capture failed.') };
+  }
+  if (message.type === 'request.error' && latestReply?.requestId === message.requestId && message.code !== 'card_resync_required') {
+    latestReply.status = 'error';
+    latestReply.error = String(message.message || message.code || 'Request failed.');
   }
 }
 
@@ -222,6 +250,16 @@ async function saveFileAudioSegment(message) {
   await mkdir(outputDirectory, { recursive: true });
   const destination = join(outputDirectory, `${message.requestId}-segment-${String(message.segmentSequence ?? 0).padStart(4, '0')}.wav`);
   await copyFile(source, destination);
+  if (latestReply?.requestId === message.requestId) {
+    latestReply.audioSegments.push({
+      sequence: Number(message.segmentSequence) || 0,
+      spokenText: String(message.spokenText || ''),
+      durationSeconds: Number(message.durationSeconds) || 0,
+      byteLength: Number(message.byteLength) || 0,
+      url: artifactUrl(destination),
+    });
+    latestReply.audioSegments.sort((left, right) => left.sequence - right.sequence);
+  }
   log('mock', 'audio_segment_saved', { requestId: message.requestId, segmentSequence: message.segmentSequence, path: destination, spokenText: message.spokenText });
   await send('reply.audio.segment.consumed', {
     requestId: message.requestId,
@@ -242,9 +280,12 @@ async function saveAudio(requestId, completed) {
   await mkdir(outputDirectory, { recursive: true });
   const path = join(outputDirectory, `${requestId}.wav`);
   await writeFile(path, wav);
+  if (latestReply?.requestId === requestId) latestReply.audioSegments = [{ sequence: 0, spokenText: latestReply.text, durationSeconds: Number(completed.durationSeconds) || 0, byteLength: wav.byteLength, url: artifactUrl(path) }];
   audio.delete(requestId);
   log('mock', 'audio_saved', { requestId, path, bytes: pcm.length, sampleRate: result.sampleRate });
 }
+
+function artifactUrl(path) { return `/artifacts/${encodeURIComponent(basename(path))}`; }
 
 async function saveMicrophoneAudio(requestId, completed) {
   const result = microphoneAudio.get(requestId);
@@ -375,7 +416,11 @@ async function consumeFileEnvelope(stem) {
   if (!duplicate) {
     seenFileMessages.add(message.messageId);
     seenFileMessageOrder.push(message.messageId);
-    if (seenFileMessageOrder.length > 2000) seenFileMessages.delete(seenFileMessageOrder.shift());
+    if (seenFileMessageOrder.length > 2000) {
+      const expired = seenFileMessageOrder.shift();
+      seenFileMessages.delete(expired);
+      fileAcknowledgedAt.delete(expired);
+    }
   }
   if (message.type === 'hello' && !duplicate) {
     activeTransport = 'filesystem';
@@ -386,7 +431,11 @@ async function consumeFileEnvelope(stem) {
     capacity = { acceptingRequests: false, queueDepth: 0, queueLimit: 20 };
   }
   if (!fileConnected) return;
-  if (message.type !== 'ack') await send('ack', { acknowledgedMessageId: message.messageId, ...(duplicate ? { duplicate: true } : {}) });
+  const acknowledgedAt = fileAcknowledgedAt.get(message.messageId) || 0;
+  if (message.type !== 'ack' && (!duplicate || Date.now() - acknowledgedAt >= 1000)) {
+    fileAcknowledgedAt.set(message.messageId, Date.now());
+    await send('ack', { acknowledgedMessageId: message.messageId, ...(duplicate ? { duplicate: true } : {}) });
+  }
   if (duplicate) return;
   if (message.type === 'hello') {
     log('pwa → game (filesystem)', 'hello', message);
@@ -401,6 +450,13 @@ const httpServer = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://127.0.0.1:${controlPort}`);
     if (url.pathname === '/api/state') return json(response, 200, state());
+    if (url.pathname.startsWith('/artifacts/') && request.method === 'GET') {
+      const name = decodeURIComponent(url.pathname.slice('/artifacts/'.length));
+      if (!name || basename(name) !== name || !name.endsWith('.wav')) return json(response, 404, { error: 'Artifact not found' });
+      const content = await readFile(join(outputDirectory, name));
+      response.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': content.byteLength, 'Cache-Control': 'no-store' });
+      response.end(content); return;
+    }
     if (url.pathname === '/api/request' && request.method === 'POST') {
       const input = await body(request);
       return json(response, 200, { requestId: await submitReply(input), state: state() });
@@ -462,7 +518,7 @@ function state() {
     clientUrl: `http://127.0.0.1:5173/#port=${socketPort}`, socketPort,
     fileTransportEnabled, mailboxDirectory: fileTransportEnabled ? mailboxDirectory : undefined,
     filePeerInstanceId: fileTransportEnabled ? filePeerInstanceId : undefined,
-    nextAudioSlot, lastCardHash, events: events.slice(-100),
+    nextAudioSlot, lastCardHash, latestReply, events: events.slice(-100),
   };
 }
 async function body(request) { const chunks = []; for await (const chunk of request) chunks.push(chunk); return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }

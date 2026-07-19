@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ACTIVE_POLL_MS, FILE_MANIFEST_SCHEMA, FILE_MANIFEST_VERSION, IDLE_POLL_MS, pcm16Wav, readyStems, writeImmutable } from './filesystem-mailbox-adapter';
+import { ACTIVE_POLL_MS, FILE_MANIFEST_SCHEMA, FILE_MANIFEST_VERSION, IDLE_POLL_MS, pcm16Wav, readyStems, recoverOutgoing, writeImmutable } from './filesystem-mailbox-adapter';
 
 describe('filesystem mailbox primitives', () => {
   it('pins the manifest version and polling latency', () => {
@@ -36,5 +36,29 @@ describe('filesystem mailbox primitives', () => {
     await writeImmutable(directory, '001-message', '{"ok":true}');
     expect(actions).toEqual(['write:001-message.json:{"ok":true}', 'close:001-message.json', 'write:001-message.ready:', 'close:001-message.ready']);
     await expect(writeImmutable(directory, '001-message', '{}')).rejects.toThrow('already exists');
+  });
+
+  it('recovers non-acknowledgement messages and removes orphaned acknowledgements after reload', async () => {
+    const files = new Map<string, string>([
+      ['001-request.json', JSON.stringify({ type: 'reply.text.delta', messageId: 'request' })],
+      ['001-request.ready', ''],
+      ['002-ack.json', JSON.stringify({ type: 'ack', messageId: 'orphaned-ack', acknowledgedMessageId: 'game-message' })],
+      ['002-ack.ready', ''],
+      ['003-unready.json', JSON.stringify({ type: 'reply.completed', messageId: 'unready' })],
+    ]);
+    const directory = {
+      async *keys() { for (const name of files.keys()) yield name; },
+      async getFileHandle(name: string) {
+        if (!files.has(name)) throw new DOMException('missing', 'NotFoundError');
+        const value = files.get(name)!;
+        return { async getFile() { return { size: new TextEncoder().encode(value).byteLength, async text() { return value; } }; } };
+      },
+      async removeEntry(name: string) { files.delete(name); },
+    } as unknown as FileSystemDirectoryHandle;
+
+    expect(Array.from((await recoverOutgoing(directory)).entries())).toEqual([['request', '001-request']]);
+    expect(files.has('002-ack.json')).toBe(false);
+    expect(files.has('002-ack.ready')).toBe(false);
+    expect(files.has('003-unready.json')).toBe(true);
   });
 });

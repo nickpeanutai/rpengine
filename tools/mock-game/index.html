@@ -30,9 +30,20 @@
         </div>
         <div class="actions"><button id="send">Send reply.request</button><button id="cancel" class="danger">Cancel active request</button></div>
       </section>
+      <section class="panel reply-panel" aria-live="polite">
+        <div class="reply-heading"><div><h2>3. Latest reply</h2><p>Streaming text and completed audio returned by RPEngine appear here.</p></div><span id="replyStatus" class="reply-status">No request</span></div>
+        <div id="replyEmpty" class="reply-empty">Send an event above to test the complete response flow.</div>
+        <div id="replyContent" hidden>
+          <p class="speaker"><strong id="replyCharacter">Character</strong> responding to <span id="replyInput"></span></p>
+          <blockquote id="replyText">Waiting for text…</blockquote>
+          <p id="replyError" class="reply-error" hidden></p>
+          <div class="reply-audio-heading"><strong>Audio segments</strong><button id="playReply" class="secondary" disabled>Play full reply</button></div>
+          <div id="replyAudio" class="reply-audio"><p class="empty-audio">Waiting for audio…</p></div>
+        </div>
+      </section>
       <section class="panel voice-panel">
         <div class="voice-heading">
-          <div><h2>3. Browser microphone + VAD</h2><p>First enable microphone permission in RPEngine. Start capture here, speak normally, then pause so FireRedVAD can end the recording automatically.</p></div>
+          <div><h2>4. Browser microphone + VAD</h2><p>First enable microphone permission in RPEngine. Start capture here, speak normally, then pause so FireRedVAD can end the recording automatically.</p></div>
           <span id="voiceStatus" class="voice-status">Idle</span>
         </div>
         <div class="voice-monitor" aria-live="polite">
@@ -44,7 +55,7 @@
         <p id="voiceTranscript" class="voice-transcript" hidden></p>
         <div class="actions"><button id="startVoice">Start microphone capture</button><button id="stopVoice" class="secondary">Stop and send</button><button id="cancelVoice" class="danger">Cancel capture</button></div>
       </section>
-      <section class="panel"><div class="log-head"><div><h2>4. Protocol log</h2><p>Generated reply WAVs, captured microphone WAVs, and Moonshine transcript files are saved under <code>tools/mock-game/test-output</code>.</p></div><button id="clear" class="secondary">Clear view</button></div><div id="log"></div></section>
+      <section class="panel"><div class="log-head"><div><h2>5. Protocol log</h2><p>Generated reply WAVs, captured microphone WAVs, and Moonshine transcript files are saved under <code>tools/mock-game/test-output</code>.</p></div><button id="clear" class="secondary">Clear view</button></div><div id="log"></div></section>
     </main><script type="module" src="/app.js"></script>
   </body>
 </html>

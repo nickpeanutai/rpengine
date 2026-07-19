@@ -1,6 +1,8 @@
 const $ = selector => document.querySelector(selector);
 let state;
 let hiddenBefore = 0;
+let replySignature = '';
+let activePlayback;
 
 async function api(path, body) {
   const response = await fetch(path, { method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
@@ -24,9 +26,34 @@ function render() {
   $('#mailboxDirectory').textContent = state.mailboxDirectory || '';
   $('#send').disabled = !state.connected || !state.capacity.acceptingRequests;
   $('#cancel').disabled = !state.activeRequestId;
+  renderLatestReply();
   renderVoiceCapture();
   const visible = state.events.slice(hiddenBefore).reverse();
   $('#log').innerHTML = visible.map(event => `<details><summary><time>${new Date(event.timestamp).toLocaleTimeString()}</time><b>${escape(event.direction)}</b><span>${escape(event.type)}</span></summary><pre>${escape(JSON.stringify(event.details, null, 2))}</pre></details>`).join('') || '<p class="empty">No protocol messages yet.</p>';
+}
+
+function renderLatestReply() {
+  const reply = state.latestReply;
+  const signature = JSON.stringify(reply || null);
+  if (signature === replySignature) return;
+  replySignature = signature;
+  $('#replyEmpty').hidden = Boolean(reply);
+  $('#replyContent').hidden = !reply;
+  $('#replyStatus').textContent = reply?.status || 'No request';
+  $('#replyStatus').className = `reply-status ${reply?.status === 'completed' ? 'completed' : reply?.status === 'error' ? 'error' : reply ? 'active' : ''}`;
+  if (!reply) return;
+  $('#replyCharacter').textContent = reply.characterName || 'Character';
+  $('#replyInput').textContent = reply.inputText ? `“${reply.inputText}”` : 'the submitted event';
+  $('#replyText').textContent = reply.text || 'Waiting for text…';
+  $('#replyError').hidden = !reply.error;
+  $('#replyError').textContent = reply.error || '';
+  const segments = reply.audioSegments || [];
+  $('#playReply').disabled = segments.length === 0;
+  $('#replyAudio').innerHTML = segments.length ? segments.map(segment => `
+    <div class="audio-segment">
+      <div><strong>Segment ${Number(segment.sequence) + 1}</strong><span>${escape(segment.spokenText || '')}</span></div>
+      <audio controls preload="metadata" src="${escape(segment.url)}"></audio>
+    </div>`).join('') : '<p class="empty-audio">Waiting for audio…</p>';
 }
 
 function renderVoiceCapture() {
@@ -94,6 +121,21 @@ $('#copyMailbox').addEventListener('click', async () => {
     $('#copyMailbox').textContent = 'Copied';
     window.setTimeout(() => { $('#copyMailbox').textContent = 'Copy mailbox path'; }, 1200);
   } catch (error) { showError(error); }
+});
+$('#playReply').addEventListener('click', async () => {
+  activePlayback?.pause();
+  const segments = state?.latestReply?.audioSegments || [];
+  $('#playReply').disabled = true;
+  $('#playReply').textContent = 'Playing…';
+  try {
+    for (const segment of segments) {
+      const audio = new Audio(segment.url);
+      activePlayback = audio;
+      await audio.play();
+      await new Promise((resolve, reject) => { audio.addEventListener('ended', resolve, { once: true }); audio.addEventListener('error', reject, { once: true }); });
+    }
+  } catch (error) { showError(error); }
+  finally { activePlayback = undefined; $('#playReply').disabled = segments.length === 0; $('#playReply').textContent = 'Play full reply'; }
 });
 $('#send').addEventListener('click', async () => { try { $('#send').disabled = true; await api('/api/request', await form()); await refresh(); } catch (error) { showError(error); } });
 $('#cancel').addEventListener('click', async () => { try { await api('/api/cancel', {}); await refresh(); } catch (error) { showError(error); } });

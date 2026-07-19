@@ -120,15 +120,23 @@ describe('mock-game filesystem transport', () => {
     expect(welcome).toMatchObject({ type: 'welcome', serverVersion: 'mock-game-1.0', nextAudioSlot: 0 });
     expect(String(welcome.peerInstanceId)).toMatch(/^mock-/);
 
-    await publishFileEnvelope(fromEngine, envelope('capacity.update', {
+    const capacityUpdate = envelope('capacity.update', {
       sessionId: welcome.sessionId, acceptingRequests: true, queueDepth: 0, queueLimit: 20,
-    }));
+    });
+    await publishFileEnvelope(fromEngine, capacityUpdate);
     await waitForState(controlPort, value => value.connected === true && value.capacity.acceptingRequests === true);
+    await new Promise(resolve => setTimeout(resolve, 250));
+    const capacityAcks = (await mailboxEnvelopes(toEngine)).filter(value => value.type === 'ack' && value.acknowledgedMessageId === capacityUpdate.messageId);
+    expect(capacityAcks).toHaveLength(1);
 
     const requestResponse = await post(controlPort, '/api/request', { ...input(), eventText: 'Hello from the filesystem test.' });
     const request = await waitForMailboxEnvelope(toEngine, observed, value => value.type === 'reply.request');
     expect(request).toMatchObject({ type: 'reply.request', requestId: requestResponse.requestId, event: { text: 'Hello from the filesystem test.' } });
     expect(() => decode_envelope(JSON.stringify(request))).not.toThrow();
+
+    await publishFileEnvelope(fromEngine, envelope('reply.text.delta', { sessionId: welcome.sessionId, requestId: request.requestId, sequence: 0, delta: 'Hello' }));
+    await publishFileEnvelope(fromEngine, envelope('reply.text.delta', { sessionId: welcome.sessionId, requestId: request.requestId, sequence: 1, delta: ' there.' }));
+    await publishFileEnvelope(fromEngine, envelope('reply.text.completed', { sessionId: welcome.sessionId, requestId: request.requestId, text: 'Hello there.', tokenCount: 2, elapsedMs: 10 }));
 
     const segmentBytes = Buffer.from('RIFFmock-wave');
     await writeFile(join(mailbox, 'audio', 'slot_0000.wav'), segmentBytes);
@@ -151,7 +159,12 @@ describe('mock-game filesystem transport', () => {
     expect(await readFile(join(outputDirectory, `${request.requestId}-segment-0000.wav`))).toEqual(segmentBytes);
 
     await publishFileEnvelope(fromEngine, envelope('reply.completed', { sessionId: welcome.sessionId, requestId: request.requestId }));
-    await waitForState(controlPort, value => value.activeRequestId === undefined);
+    const completed = await waitForState(controlPort, value => value.activeRequestId === undefined);
+    expect(completed.latestReply).toMatchObject({ requestId: request.requestId, status: 'completed', text: 'Hello there.' });
+    expect(completed.latestReply.audioSegments).toEqual([expect.objectContaining({ sequence: 0, spokenText: 'Hello.', url: `/artifacts/${request.requestId}-segment-0000.wav` })]);
+    const artifact = await requestBytes(controlPort, completed.latestReply.audioSegments[0].url);
+    expect(artifact.status).toBe(200);
+    expect(artifact.body).toEqual(segmentBytes);
   });
 });
 
@@ -232,6 +245,27 @@ async function waitForMailboxEnvelope(directory: string, observed: Set<string>, 
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   throw new Error('Timed out waiting for a filesystem mailbox envelope.');
+}
+
+async function mailboxEnvelopes(directory: string) {
+  const values: Array<Record<string, any>> = [];
+  for (const marker of (await readdir(directory)).filter(name => name.endsWith('.ready'))) {
+    const stem = marker.slice(0, -6);
+    values.push(JSON.parse(await readFile(join(directory, `${stem}.json`), 'utf8')) as Record<string, any>);
+  }
+  return values;
+}
+
+async function requestBytes(port: number, path: string) {
+  return new Promise<{ status: number; body: Buffer }>((resolve, reject) => {
+    const request = httpRequest({ hostname: '127.0.0.1', port, path }, result => {
+      const chunks: Buffer[] = [];
+      result.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      result.on('end', () => resolve({ status: result.statusCode ?? 0, body: Buffer.concat(chunks) }));
+    });
+    request.once('error', reject);
+    request.end();
+  });
 }
 
 async function freePort(excluded?: number) {

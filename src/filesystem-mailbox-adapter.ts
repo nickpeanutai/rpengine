@@ -55,6 +55,8 @@ export class FileSystemMailboxAdapter implements TransportAdapter {
       this.audio = await this.root.getDirectoryHandle(this.manifest.audio.directory);
       this.connected = true;
       await this.cleanupStale();
+      this.outgoing.clear();
+      for (const [messageId, stem] of await recoverOutgoing(this.outbound)) this.outgoing.set(messageId, stem);
       this.events.opened();
       this.schedule(0);
     } catch (error) { this.events.error(error instanceof Error ? error.message : String(error)); }
@@ -151,8 +153,10 @@ export class FileSystemMailboxAdapter implements TransportAdapter {
 
   private async removeAcknowledged(messageId: string) {
     if (!this.outbound) return;
-    const stem = this.outgoing.get(messageId); if (!stem) return;
-    await removePair(this.outbound, stem); this.outgoing.delete(messageId);
+    const indexed = this.outgoing.get(messageId);
+    const stems = indexed ? [indexed] : readyStems(await directoryNames(this.outbound)).filter(stem => stem.endsWith(`-${messageId}`));
+    for (const stem of stems) await removePair(this.outbound, stem);
+    this.outgoing.delete(messageId);
   }
 
   private async restoreSilence(slotIndex: number) {
@@ -182,6 +186,26 @@ async function readManifest(root: FileSystemDirectoryHandle): Promise<MailboxMan
 }
 
 export function readyStems(names: Iterable<string>) { return Array.from(names).filter(name => name.endsWith('.ready')).map(name => name.slice(0, -6)).sort(); }
+
+export async function recoverOutgoing(directory: FileSystemDirectoryHandle) {
+  const recovered = new Map<string, string>();
+  for (const stem of readyStems(await directoryNames(directory))) {
+    try {
+      const file = await (await directory.getFileHandle(`${stem}.json`)).getFile();
+      if (file.size > MAX_MESSAGE_BYTES) continue;
+      const envelope = JSON.parse(await file.text()) as Record<string, unknown>;
+      if (envelope.type === 'ack') { await removePair(directory, stem); continue; }
+      if (typeof envelope.messageId === 'string') recovered.set(envelope.messageId, stem);
+    } catch { /* A concurrently consumed or incomplete pair is ignored. */ }
+  }
+  return recovered;
+}
+
+async function directoryNames(directory: FileSystemDirectoryHandle) {
+  const names: string[] = [];
+  for await (const name of directory.keys()) names.push(name);
+  return names;
+}
 
 export async function writeImmutable(directory: FileSystemDirectoryHandle, stem: string, raw: string) {
   const json = await createExclusive(directory, `${stem}.json`);
