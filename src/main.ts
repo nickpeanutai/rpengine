@@ -8,7 +8,7 @@ void initializeGitHubStars();
 
 try {
   await initializeCore();
-  new AppHost().start();
+  await new AppHost().start();
 } catch (error) {
   const button = element<HTMLButtonElement>('#primaryButton');
   button.disabled = true;

@@ -23,6 +23,6 @@ pub use worker::*;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
-pub fn core_abi_version() -> u32 { 2 }
+pub fn core_abi_version() -> u32 { 3 }
 
 fn js_error(error: impl ToString) -> JsError { JsError::new(&error.to_string()) }

@@ -81,7 +81,7 @@ fn prompt_context(request: &serde_json::Map<String, Value>, render: &impl Fn(&st
     let scene = request.get("promptScene")?.as_object()?;
     let directive = request.get("promptDirective")?.as_object()?;
     let configured = string_field(directive.get("sceneContext"));
-    let scene_context = if configured.is_empty() { format!("[RimWorld scene context]\n{}", string_field(scene.get("sceneLine"))) } else { configured };
+    let scene_context = if configured.is_empty() { format!("[Game scene context]\n{}", string_field(scene.get("sceneLine"))) } else { configured };
     let guide = string_field(directive.get(if mode == "auto_event" { "autoEventGuide" } else { "directUserGuide" }));
     if scene_context.is_empty() || guide.is_empty() { None } else { Some((render(&scene_context), render(&guide))) }
 }

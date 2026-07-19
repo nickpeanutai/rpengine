@@ -1,10 +1,10 @@
-import type { AppViewModelV2 } from './core-contract';
+import type { AppViewModelV3 } from './core-contract';
 import { DiagnosticLog } from './diagnostics';
 
 const $ = <T extends HTMLElement>(selector: string) => { const element = document.querySelector<T>(selector); if (!element) throw new Error(`Missing element: ${selector}`); return element; };
 
 export class AppRenderer {
-  render(view: AppViewModelV2) {
+  render(view: AppViewModelV3) {
     const connection = $('#connectionStatus'); connection.textContent = view.connection.label; connection.className = `status launch-status ${view.connection.connected ? 'success' : ''}`;
     const primary = $('#primaryButton') as HTMLButtonElement; primary.disabled = view.primary.disabled; primary.classList.toggle('is-indeterminate', view.primary.indeterminate);
     $('#primaryButtonLabel').textContent = view.primary.label; $('#primaryButtonDetail').textContent = view.primary.detail;
@@ -15,6 +15,8 @@ export class AppRenderer {
     language.innerHTML = view.settings.languages.map(option => `<option value="${escapeHTML(option.value)}"${option.value === view.settings.language ? ' selected' : ''}>${escapeHTML(option.label)}</option>`).join('');
     language.disabled = view.settings.languageDisabled;
     const port = $('#rpEnginePortInput') as HTMLInputElement; port.value = String(view.settings.port); port.disabled = view.settings.portDisabled;
+    const transport = $('#transportSelect') as HTMLSelectElement; transport.disabled = view.service.phase !== 'idle';
+    ($('#chooseMailboxButton') as HTMLButtonElement).disabled = view.service.phase !== 'idle';
     $('#modelEntries').innerHTML = view.models.map(model => `<article class="model-entry"><div><span>${escapeHTML(model.role)}</span><strong>${escapeHTML(model.name)}</strong><small>${escapeHTML(model.status)}${model.transfer ? ` · ${escapeHTML(model.transfer)}` : ''}</small>${model.showProgress ? `<progress class="model-progress" max="100" value="${Math.round(model.progress * 100)}" aria-label="Download progress"></progress>` : ''}</div><button type="button" class="secondary compact" data-model-action="${model.action}" data-model-id="${escapeHTML(model.id)}"${model.disabled ? ' disabled' : ''}>${escapeHTML(model.actionLabel)}</button></article>`).join('');
   }
 

@@ -112,10 +112,20 @@
         <form method="dialog"><button type="submit" class="secondary compact">Close</button></form>
       </header>
       <div class="model-manager">
-        <label class="language-field" for="rpEnginePortInput">
-          <span>Game connection port</span>
-          <input id="rpEnginePortInput" type="number" min="1024" max="65535" step="1" inputmode="numeric" />
+        <label class="language-field" for="transportSelect">
+          <span>Game transport</span>
+          <select id="transportSelect"><option value="websocket">WebSocket</option><option value="filesystem">Filesystem mailbox</option></select>
         </label>
+        <div id="webSocketControls">
+          <label class="language-field" for="rpEnginePortInput">
+            <span>Game connection port</span>
+            <input id="rpEnginePortInput" type="number" min="1024" max="65535" step="1" inputmode="numeric" />
+          </label>
+        </div>
+        <div id="fileTransportControls" hidden>
+          <button id="chooseMailboxButton" type="button" class="secondary">Choose mailbox folder</button>
+          <p id="mailboxStatus">Choose an integration folder containing a valid file-transport manifest. RPEngine stores the folder permission handle, not conversations.</p>
+        </div>
         <label class="language-field" for="languageSelect">
           <span>Speech input language</span>
           <select id="languageSelect"></select>
@@ -139,6 +149,7 @@
           <ul>
             <li>Start a WebSocket listener at <code>ws://127.0.0.1:PORT/rp-engine/socket</code>.</li>
             <li>Use the same port in the game integration and RPEngine settings. The default is <code>38471</code>.</li>
+            <li>Alternatively, choose a game-neutral file-transport v1 mailbox root in Settings. RPEngine uses the same protocol-v3 envelopes and acknowledgement semantics.</li>
           </ul>
         </section>
 
@@ -214,13 +225,14 @@
           <h3>Browser microphone request</h3>
           <p>Use <code>voice.capture.start</code> when the player should speak through the microphone attached to the RPEngine browser. It uses the same <code>requestId</code>, <code>eventId</code>, <code>integrationId</code>, <code>characterId</code>, <code>output</code>, <code>player</code>, card transfer, and optional prompt fields as <code>reply.request</code>, but it does not include <code>event</code>.</p>
           <p>The player must enable microphone access in RPEngine first. RPEngine reports <code>voice.capture.level</code> and <code>voice.capture.state</code>. FireRedVAD normally ends speech automatically; the game may send <code>voice.capture.stop</code> to finish manually or <code>voice.capture.cancel</code> to discard the capture. Successful speech then follows the normal reply stream.</p>
+          <p>Set <code>returnTranscript: true</code> to receive one local <code>voice.capture.transcript</code> envelope. It is omitted unless explicitly requested.</p>
         </section>
 
         <section>
           <h3>Character card transfer</h3>
           <p>Character Card V2 is the canonical character format. Send a complete <code>chara_card_v2</code> document with <code>spec_version: "2.0"</code> and all required fields. Use empty values where your game has no content; unknown fields and extension data are preserved.</p>
           <ul>
-            <li><code>snapshot</code>: full Character Card V2 plus <code>targetHash</code>.</li>
+            <li><code>snapshot</code>: full Character Card V2; <code>targetHash</code> is optional and RPEngine computes it when omitted.</li>
             <li><code>patch</code>: RFC 6902 operations plus <code>baseHash</code> and <code>targetHash</code>.</li>
             <li><code>reference</code>: an unchanged session card identified by <code>targetHash</code>.</li>
           </ul>

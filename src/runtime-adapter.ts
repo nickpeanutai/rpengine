@@ -1,4 +1,4 @@
-import type { HostAudioEventV2, HostEventV2, WorkerResultV2 } from './core-contract';
+import type { HostAudioEventV3, HostEventV3, WorkerResultV2 } from './core-contract';
 import { GemmaClient } from './gemma-client';
 import { ModelAdapter } from './model-adapter';
 import { SttClient } from './stt-client';
@@ -12,8 +12,8 @@ export class RuntimeAdapter {
   private tts?: TtsClient;
   constructor(
     private readonly models: ModelAdapter,
-    private readonly dispatch: (event: HostEventV2) => void,
-    private readonly dispatchAudio: (event: HostAudioEventV2, samples: Float32Array) => void,
+    private readonly dispatch: (event: HostEventV3) => void,
+    private readonly dispatchAudio: (event: HostAudioEventV3, samples: Float32Array) => void,
   ) {}
 
   async load(operationId: number, language: MoonshineLanguage, defaultVoice: string) {

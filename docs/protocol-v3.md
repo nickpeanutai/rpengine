@@ -23,9 +23,11 @@ Snapshots and reconstructed patches must contain `spec: "chara_card_v2"`, `spec_
 
 RPEngine validates and transports the complete V2 document. Its current stateless reply assembler consumes the card's core prompt fields (`system_prompt`, `description`, `personality`, `scenario`, `mes_example`, and `post_history_instructions`). It preserves optional fields such as `character_book`, but lorebook scanning and activation are not part of the current runtime.
 
-- Snapshot: `{"format":"chara_card_v2","mode":"snapshot","snapshot":{...},"targetHash":"..."}`
+- Snapshot: `{"format":"chara_card_v2","mode":"snapshot","snapshot":{...}}` (`targetHash` is optional and is computed when absent)
 - Patch: `{"format":"chara_card_v2","mode":"patch","patch":[...],"baseHash":"...","targetHash":"..."}`
 - Reference: `{"format":"chara_card_v2","mode":"reference","targetHash":"..."}`
+
+The optional game-neutral filesystem mapping is specified in [`file-transport-v1.md`](file-transport-v1.md). It carries these same envelopes and does not introduce conversation storage in RPEngine.
 
 Clones are scoped to `integrationId + characterId` within one connection session. A missing base or hash mismatch returns `request.error` with `code: "card_resync_required"`; retry the same request with a snapshot.
 

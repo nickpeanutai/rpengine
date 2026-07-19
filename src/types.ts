@@ -50,7 +50,7 @@ export type JsonPatchOperation =
   | { op: 'move' | 'copy'; from: string; path: string };
 
 export type CardTransfer =
-  | { format: 'chara_card_v2'; mode: 'snapshot'; snapshot: CharacterCardV2; targetHash: string }
+  | { format: 'chara_card_v2'; mode: 'snapshot'; snapshot: CharacterCardV2; targetHash?: string }
   | { format: 'chara_card_v2'; mode: 'patch'; patch: JsonPatchOperation[]; baseHash: string; targetHash: string }
   | { format: 'chara_card_v2'; mode: 'reference'; targetHash: string };
 
@@ -138,6 +138,7 @@ export interface VoiceCaptureStartEnvelope extends EnvelopeBase {
   interactionMode?: InteractionMode;
   promptScene?: PromptScene;
   promptDirective?: PromptDirective;
+  returnTranscript?: boolean;
 }
 
 export interface VoiceCaptureStopEnvelope extends EnvelopeBase {

@@ -225,8 +225,8 @@ fn validate_card_transfer(value: Option<&Value>) -> Result<(), String> {
     if card.get("format").and_then(Value::as_str) != Some("chara_card_v2") { return Err("Only chara_card_v2 is supported.".into()); }
     let mode = card.get("mode").and_then(Value::as_str).unwrap_or_default();
     if !["snapshot", "patch", "reference"].contains(&mode) { return Err("Invalid character card transfer mode.".into()); }
-    req_string(card, "targetHash")?;
     if mode == "snapshot" && !card.get("snapshot").is_some_and(Value::is_object) { return Err("A snapshot transfer requires a card object.".into()); }
+    if mode != "snapshot" { req_string(card, "targetHash")?; }
     if mode == "patch" { req_string(card, "baseHash")?; if !card.get("patch").is_some_and(Value::is_array) { return Err("A patch transfer requires RFC 6902 operations.".into()); } }
     Ok(())
 }
@@ -287,7 +287,7 @@ pub(crate) fn validate_envelope_value(value: &Value) -> Result<(), String> {
             }
             validate_output(envelope.get("output"))?; validate_card_transfer(envelope.get("card"))?; validate_prompt_context(envelope)?;
         }
-        "voice.capture.start" => { for key in ["requestId", "eventId", "integrationId", "characterId"] { req_string(envelope, key)?; } validate_output(envelope.get("output"))?; validate_card_transfer(envelope.get("card"))?; validate_prompt_context(envelope)?; }
+        "voice.capture.start" => { for key in ["requestId", "eventId", "integrationId", "characterId"] { req_string(envelope, key)?; } if envelope.get("returnTranscript").is_some_and(|value| !value.is_boolean()) { return Err("returnTranscript must be a boolean.".into()); } validate_output(envelope.get("output"))?; validate_card_transfer(envelope.get("card"))?; validate_prompt_context(envelope)?; }
         "voice.capture.stop" | "voice.capture.cancel" | "request.cancel" => req_string(envelope, "requestId")?,
         _ => {}
     }

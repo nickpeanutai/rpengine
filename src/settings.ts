@@ -1,4 +1,5 @@
 import { default_moonshine_language, valid_moonshine_language, valid_rp_engine_port, valid_voice } from './core';
+import type { TransportKind } from './transport-adapter';
 
 export const SUPERTONIC_LANGUAGES = [
   'en', 'ko', 'es', 'pt', 'fr', 'de', 'it', 'pl', 'ru', 'nl', 'cs', 'ar', 'zh', 'ja', 'hu', 'tr',
@@ -17,6 +18,7 @@ export const LANGUAGE_NAMES: Record<MoonshineLanguage, string> = {
 const LANGUAGE_KEY = 'rp-engine.language';
 const VOICE_KEY = 'rp-engine.voice';
 const PORT_KEY = 'rp-engine.port';
+const TRANSPORT_KEY = 'rp-engine.transport';
 export const DEFAULT_RP_ENGINE_PORT = 38471;
 
 function defaultLanguage(): MoonshineLanguage {
@@ -55,3 +57,6 @@ export function saveRPEnginePort(value: number) {
   if (!validRPEnginePort(value)) throw new Error('Game connection port must be between 1024 and 65535.');
   localStorage.setItem(PORT_KEY, String(value));
 }
+
+export function loadTransportKind(): TransportKind { return localStorage.getItem(TRANSPORT_KEY) === 'filesystem' ? 'filesystem' : 'websocket'; }
+export function saveTransportKind(value: TransportKind) { localStorage.setItem(TRANSPORT_KEY, value); }

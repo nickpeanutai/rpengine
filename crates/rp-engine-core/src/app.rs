@@ -8,7 +8,7 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use wasm_bindgen::prelude::*;
 
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 3;
 const QUEUE_LIMIT: usize = 20;
 const GEMMA_ID: &str = "gemma-4-E2B-it-web-litertlm";
 const TTS_ID: &str = "gemtavern-supertonic-3";
@@ -88,7 +88,7 @@ struct SpeechState {
     expression_tags: Vec<String>,
     chunker: SpeechChunkerCore,
     pending: VecDeque<(u32, String)>,
-    inflight: Option<(u64, u32)>,
+    inflight: Option<(u64, u32, String)>,
     started: bool,
     audio_sequence: u32,
     segment_count: u32,
@@ -122,12 +122,15 @@ struct CaptureRequest { envelope: Value, card: Value, phase: CapturePhase, opera
 
 enum SttTarget { Reply(String), Capture(String) }
 
+#[derive(Clone)]
 struct ReplyAudioTransportJob {
     samples: Vec<f32>,
     request_id: String,
     session_id: Option<String>,
     sample_rate: u32,
     segment_sequence: u32,
+    spoken_text: String,
+    duration_seconds: f64,
     first_audio_sequence: u32,
     send_start: bool,
 }
@@ -135,9 +138,9 @@ struct ReplyAudioTransportJob {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum CoreEffectV2 {
-    SocketConnect { port: u16, attempt: u32 },
-    SocketDisconnect { reason: String },
-    SocketSend { message_type: String, payload: Value, session_id: Option<String> },
+    TransportConnect { port: u16, attempt: u32 },
+    TransportDisconnect { reason: String },
+    TransportSend { message_type: String, payload: Value, session_id: Option<String> },
     ScheduleTimer { timer_id: String, delay_ms: u32 },
     CancelTimer { timer_id: String },
     OwnershipAcquire,
@@ -204,7 +207,7 @@ pub struct CoreSession {
     connection_state: String,
     session_id: Option<String>,
     reconnect_attempt: u32,
-    socket_attempt: u32,
+    transport_attempt: u32,
 }
 
 #[wasm_bindgen]
@@ -218,7 +221,7 @@ impl CoreSession {
             runtimes_ready: false, runtime_operation: None, expression_tags: Vec::new(), ownership_owned: false, owner_elsewhere: false,
             owner_elsewhere_phase: None, release_after_action: false, pending_downloads: VecDeque::new(), active_download: None, manual_model_action: None,
             microphone_enabled: false, microphone_pending: false, microphone_error: String::new(), connection_state: "idle".into(), session_id: None,
-            reconnect_attempt: 0, socket_attempt: 0,
+            reconnect_attempt: 0, transport_attempt: 0,
         }
     }
 
@@ -247,32 +250,24 @@ impl CoreSession {
         self.buffers.remove(&buffer_id).ok_or_else(|| js_error(format!("Unknown or consumed audio buffer: {buffer_id}")))
     }
 
+    pub fn take_reply_audio_segment(&mut self, transport_id: u32) -> Result<String, JsError> {
+        let job = self.reply_audio_transports.remove(&transport_id).ok_or_else(|| js_error(format!("Unknown or consumed reply audio transport: {transport_id}")))?;
+        let pcm = float32_to_pcm16(&job.samples);
+        serde_json::to_string(&json!({
+            "requestId": job.request_id, "sessionId": job.session_id, "sampleRate": job.sample_rate,
+            "channels": 1, "segmentSequence": job.segment_sequence, "spokenText": job.spoken_text,
+            "durationSeconds": job.duration_seconds, "firstAudioSequence": job.first_audio_sequence,
+            "sendStart": job.send_start, "pcm16Base64": base64_bytes(&pcm), "byteLength": pcm.len()
+        })).map_err(js_error)
+    }
+
     pub fn take_reply_audio_transport(&mut self, transport_id: u32) -> Result<String, JsError> {
         let job = self.reply_audio_transports.remove(&transport_id).ok_or_else(|| js_error(format!("Unknown or consumed reply audio transport: {transport_id}")))?;
         let pcm = float32_to_pcm16(&job.samples);
         let chunks = pcm.chunks(PCM_CHUNK_BYTES).collect::<Vec<_>>();
         let mut effects = Vec::with_capacity(chunks.len() + usize::from(job.send_start));
-        if job.send_start {
-            effects.push(CoreEffectV2::SocketSend {
-                message_type: "reply.audio.start".into(),
-                payload: json!({ "requestId":job.request_id, "format":"pcm_s16le", "sampleRate":job.sample_rate, "channels":1 }),
-                session_id: job.session_id.clone(),
-            });
-        }
-        for (segment_chunk_sequence, chunk) in chunks.iter().enumerate() {
-            effects.push(CoreEffectV2::SocketSend {
-                message_type: "reply.audio.chunk".into(),
-                payload: json!({
-                    "requestId":job.request_id,
-                    "sequence":job.first_audio_sequence + segment_chunk_sequence as u32,
-                    "segmentSequence":job.segment_sequence,
-                    "segmentChunkSequence":segment_chunk_sequence,
-                    "segmentChunkCount":chunks.len(),
-                    "data":base64_bytes(chunk)
-                }),
-                session_id: job.session_id.clone(),
-            });
-        }
+        if job.send_start { effects.push(CoreEffectV2::TransportSend { message_type: "reply.audio.start".into(), payload: json!({ "requestId":job.request_id, "format":"pcm_s16le", "sampleRate":job.sample_rate, "channels":1 }), session_id: job.session_id.clone() }); }
+        for (sequence, chunk) in chunks.iter().enumerate() { effects.push(CoreEffectV2::TransportSend { message_type: "reply.audio.chunk".into(), payload: json!({ "requestId":job.request_id, "sequence":job.first_audio_sequence + sequence as u32, "segmentSequence":job.segment_sequence, "segmentChunkSequence":sequence, "segmentChunkCount":chunks.len(), "data":base64_bytes(chunk) }), session_id: job.session_id.clone() }); }
         self.serialize(effects)
     }
 
@@ -318,10 +313,10 @@ impl CoreSession {
             "microphoneEnabled" => { self.microphone_pending = false; self.microphone_enabled = true; self.microphone_error.clear(); self.diagnostic(effects, "info", "microphone", "Browser microphone enabled.", None); }
             "microphoneDisabled" => { self.microphone_pending = false; self.microphone_enabled = false; self.microphone_error.clear(); self.diagnostic(effects, "info", "microphone", "Browser microphone disabled.", None); }
             "microphoneFailed" => { self.microphone_pending = false; self.microphone_enabled = false; self.microphone_error = string(object, "message"); self.diagnostic(effects, "error", "microphone", &self.microphone_error.clone(), None); }
-            "socketOpened" => self.socket_opened(effects),
-            "socketMessage" => self.socket_message(object.get("raw").and_then(Value::as_str).unwrap_or_default(), effects),
-            "socketClosed" => self.socket_closed(object, effects),
-            "socketError" => { self.connection_state = "error".into(); self.diagnostic(effects, "error", "connection", &string(object, "message"), None); }
+            "transportOpened" => self.transport_opened(effects),
+            "transportMessage" => self.transport_message(object.get("raw").and_then(Value::as_str).unwrap_or_default(), effects),
+            "transportClosed" => self.transport_closed(object, effects),
+            "transportError" => { self.connection_state = "error".into(); self.diagnostic(effects, "error", "connection", &string(object, "message"), None); }
             "timerFired" => self.timer_fired(object.get("timerId").and_then(Value::as_str).unwrap_or_default(), effects),
             "captureLevel" => self.capture_level(object, effects),
             "captureState" => self.capture_state(object, effects),
@@ -455,7 +450,7 @@ impl CoreSession {
         self.session_id = None;
         effects.push(CoreEffectV2::CancelTimer { timer_id: "welcome".into() });
         effects.push(CoreEffectV2::CancelTimer { timer_id: "reconnect".into() });
-        effects.push(CoreEffectV2::SocketDisconnect { reason: if page_hide { "Page closed" } else { "Service stopped" }.into() });
+        effects.push(CoreEffectV2::TransportDisconnect { reason: if page_hide { "Page closed" } else { "Service stopped" }.into() });
         effects.push(CoreEffectV2::RuntimesDispose);
         if self.ownership_owned { effects.push(CoreEffectV2::OwnershipRelease); }
     }
@@ -469,7 +464,7 @@ impl CoreSession {
         if !(1024..=65535).contains(&port) { self.diagnostic(effects, "warn", "settings", "Enter a port between 1024 and 65535.", None); return; }
         if self.port == port as u16 { return; }
         self.port = port as u16;
-        if self.service_started { effects.push(CoreEffectV2::SocketDisconnect { reason: "Port changed".into() }); self.connect(effects); }
+        if self.service_started { effects.push(CoreEffectV2::TransportDisconnect { reason: "Connection setting changed".into() }); self.connect(effects); }
     }
 
     fn model_action(&mut self, object: &Map<String, Value>, effects: &mut Vec<CoreEffectV2>) {
@@ -538,19 +533,19 @@ impl CoreSession {
 
     fn connect(&mut self, effects: &mut Vec<CoreEffectV2>) {
         if !self.service_started { return; }
-        self.socket_attempt += 1;
+        self.transport_attempt += 1;
         self.connection_state = "connecting".into();
-        effects.push(CoreEffectV2::SocketConnect { port: self.port, attempt: self.socket_attempt });
+        effects.push(CoreEffectV2::TransportConnect { port: self.port, attempt: self.transport_attempt });
     }
 
-    fn socket_opened(&mut self, effects: &mut Vec<CoreEffectV2>) {
+    fn transport_opened(&mut self, effects: &mut Vec<CoreEffectV2>) {
         if !self.service_started { return; }
         self.connection_state = "handshaking".into();
         self.send(effects, "hello", json!({ "clientVersion": self.app_version }));
         effects.push(CoreEffectV2::ScheduleTimer { timer_id: "welcome".into(), delay_ms: 5000 });
     }
 
-    fn socket_message(&mut self, raw: &str, effects: &mut Vec<CoreEffectV2>) {
+    fn transport_message(&mut self, raw: &str, effects: &mut Vec<CoreEffectV2>) {
         let envelope = match parse_json(raw).and_then(|value| { validate_envelope_value(&value)?; Ok(value) }) {
             Ok(value) => value,
             Err(message) => { self.diagnostic(effects, "error", "protocol", "Rejected game payload", Some(json!({ "message": message }))); self.send(effects, "request.error", json!({ "code":"invalid_payload", "message":message })); return; }
@@ -577,7 +572,7 @@ impl CoreSession {
         }
     }
 
-    fn socket_closed(&mut self, _object: &Map<String, Value>, effects: &mut Vec<CoreEffectV2>) {
+    fn transport_closed(&mut self, _object: &Map<String, Value>, effects: &mut Vec<CoreEffectV2>) {
         self.connection_state = "disconnected".into(); self.session_id = None; self.cards.clear();
         effects.push(CoreEffectV2::CancelTimer { timer_id: "welcome".into() });
         self.cancel_all(effects, "connection_lost");
@@ -593,7 +588,7 @@ impl CoreSession {
         else if timer == "welcome" && self.connection_state == "handshaking" {
             self.connection_state = "error".into();
             self.diagnostic(effects, "error", "connection", "The game did not complete the local handshake. Retrying…", None);
-            effects.push(CoreEffectV2::SocketDisconnect { reason: "Welcome timeout".into() });
+            effects.push(CoreEffectV2::TransportDisconnect { reason: "Welcome timeout".into() });
             let delay = (1000_u32.saturating_mul(2_u32.saturating_pow(self.reconnect_attempt))).min(15000);
             self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
             effects.push(CoreEffectV2::ScheduleTimer { timer_id: "reconnect".into(), delay_ms: delay });
@@ -653,7 +648,7 @@ impl CoreSession {
         if self.accepted.contains(request_id) { return Err(("duplicate_request", "This requestId is already active.".into())); }
         if !self.ready() { return Err(("service_not_started", "Start RPEngine first.".into())); }
         if self.queue_depth() >= QUEUE_LIMIT { return Err(("capacity_exceeded", "The local request queue is full.".into())); }
-        if voice && !self.microphone_enabled { return Err(("microphone_not_enabled", if self.microphone_error.is_empty() { "Click Enable microphone before RimCall voice chat.".into() } else { self.microphone_error.clone() })); }
+        if voice && !self.microphone_enabled { return Err(("microphone_not_enabled", if self.microphone_error.is_empty() { "Click Enable microphone before starting voice capture.".into() } else { self.microphone_error.clone() })); }
         if voice && self.capture.is_some() { return Err(("voice_capture_active", "Another voice capture is already active.".into())); }
         Ok(())
     }
@@ -722,9 +717,7 @@ impl CoreSession {
             SttTarget::Reply(request_id) => { if self.active.as_ref().is_some_and(|active| active.request_id == request_id && active.stt_operation == Some(operation)) { self.begin_gemma(Some(text), effects); } }
             SttTarget::Capture(request_id) => {
                 let Some(capture) = self.capture.take().filter(|capture| capture.envelope.get("requestId").and_then(Value::as_str) == Some(&request_id) && capture.operation == Some(operation)) else { return; };
-                let echo_to_mock = capture.envelope.get("integrationId").and_then(Value::as_str) == Some("mock-game")
-                    && capture.envelope.pointer("/debug/echoTranscript").and_then(Value::as_bool) == Some(true);
-                if echo_to_mock {
+                if capture.envelope.get("returnTranscript").and_then(Value::as_bool) == Some(true) {
                     self.send(effects, "voice.capture.transcript", json!({ "requestId":request_id, "text":text, "language":self.selected_language, "elapsedMs":object.get("elapsedMs").and_then(Value::as_f64).unwrap_or(0.0) }));
                 }
                 if text.is_empty() { self.accepted.remove(&request_id); self.request_error_code(Some(&request_id), capture.envelope.get("messageId").and_then(Value::as_str).unwrap_or_default(), "empty_speech", "No speech was recognized from this recording.".into(), effects); }
@@ -770,9 +763,9 @@ impl CoreSession {
         if speech.inflight.is_none() {
             if let Some((sequence, text)) = speech.pending.pop_front() {
                 let allowed = serde_json::to_string(&speech.expression_tags).unwrap_or_else(|_| "[]".into());
-                let tagged = synthesis_text_inner(&text, &allowed).unwrap_or(text).trim().to_string();
+                let tagged = synthesis_text_inner(&text, &allowed).unwrap_or_else(|_| text.clone()).trim().to_string();
                 if !tagged.is_empty() {
-                    let operation = self.next_operation(); speech.inflight = Some((operation, sequence));
+                    let operation = self.next_operation(); speech.inflight = Some((operation, sequence, text.clone()));
                     effects.push(CoreEffectV2::TtsInvoke { operation_id: operation, text: tagged, language: speech.language.clone(), voice: speech.voice.clone(), segment_sequence: sequence });
                 }
             }
@@ -787,7 +780,7 @@ impl CoreSession {
         let elapsed = event.get("elapsedMs").and_then(Value::as_f64).unwrap_or(0.0);
         let Some(mut active) = self.active.take() else { return; };
         let Some(speech) = active.speech.as_mut() else { self.active = Some(active); return; };
-        let Some((expected, segment_sequence)) = speech.inflight else { self.active = Some(active); return; };
+        let Some((expected, segment_sequence, spoken_text)) = speech.inflight.clone() else { self.active = Some(active); return; };
         if expected != operation { self.active = Some(active); return; }
         if sample_rate != 44100 { self.active = Some(active); self.fail_active("unsupported_sample_rate", format!("Supertonic returned {sample_rate} Hz; voice output requires 44100 Hz."), effects); return; }
         let total_bytes = samples.len().saturating_mul(2);
@@ -808,14 +801,17 @@ impl CoreSession {
             session_id: self.session_id.clone(),
             sample_rate: sample_rate as u32,
             segment_sequence,
+            spoken_text,
+            duration_seconds: duration,
             first_audio_sequence,
             send_start,
         });
         self.active = Some(active);
 
         // Start the next sentence in the TTS worker before main-thread PCM conversion and
-        // Base64/WebSocket transport for this sentence. The following transport effect is
-        // consume-once and still executes the proprietary conversion inside Rust/WASM.
+        // Start sentence N+1 before the host consumes sentence N's PCM segment. The
+        // consume-once segment keeps conversion inside Rust/WASM while the selected host
+        // transport decides between the existing WebSocket chunks and a complete WAV.
         self.start_tts_if_needed(effects);
         effects.push(CoreEffectV2::ReplyAudioTransport { transport_id });
         self.complete_if_ready(effects);
@@ -888,7 +884,7 @@ impl CoreSession {
             }
             return;
         }
-        let matches_active = self.active.as_ref().is_some_and(|active| active.gemma_operation == Some(operation) || active.speech.as_ref().and_then(|speech| speech.inflight).is_some_and(|value| value.0 == operation));
+        let matches_active = self.active.as_ref().is_some_and(|active| active.gemma_operation == Some(operation) || active.speech.as_ref().and_then(|speech| speech.inflight.as_ref()).is_some_and(|value| value.0 == operation));
         if matches_active { self.fail_active("request_failed", format!("{runtime}: {}", string(object, "message")), effects); }
     }
 
@@ -934,11 +930,11 @@ impl CoreSession {
     }
 
     fn publish_capacity(&self, effects: &mut Vec<CoreEffectV2>) {
-        effects.push(CoreEffectV2::SocketSend { message_type: "capacity.update".into(), payload: json!({ "queueDepth":self.queue_depth(), "queueLimit":QUEUE_LIMIT, "acceptingRequests":self.ready() && self.queue_depth() < QUEUE_LIMIT }), session_id: self.session_id.clone() });
+        effects.push(CoreEffectV2::TransportSend { message_type: "capacity.update".into(), payload: json!({ "queueDepth":self.queue_depth(), "queueLimit":QUEUE_LIMIT, "acceptingRequests":self.ready() && self.queue_depth() < QUEUE_LIMIT }), session_id: self.session_id.clone() });
     }
 
     fn send(&self, effects: &mut Vec<CoreEffectV2>, message_type: &str, payload: Value) {
-        effects.push(CoreEffectV2::SocketSend { message_type: message_type.into(), payload, session_id: self.session_id.clone() });
+        effects.push(CoreEffectV2::TransportSend { message_type: message_type.into(), payload, session_id: self.session_id.clone() });
     }
 
     fn diagnostic(&self, effects: &mut Vec<CoreEffectV2>, level: &str, category: &str, message: &str, details: Option<Value>) {
@@ -1035,12 +1031,12 @@ mod tests {
         map.extend(json!({"requestId":id,"eventId":format!("e-{id}"),"integrationId":"test","characterId":"rika","event":if audio_input { json!({"audio":{"format":"pcm_s16le","sampleRate":16000,"channels":1,"language":"en","data":"AAAAAA=="}}) } else { json!({"text":"Hello"}) },"output":output,"card":transfer()}).as_object().unwrap().clone());
         value
     }
-    fn socket(core: &mut CoreSession, envelope: Value) -> Value { dispatch(core, json!({"type":"socketMessage","raw":envelope.to_string()})) }
+    fn socket(core: &mut CoreSession, envelope: Value) -> Value { dispatch(core, json!({"type":"transportMessage","raw":envelope.to_string()})) }
 
     #[test]
-    fn abi_v2_bootstraps_with_model_refresh_and_view() {
+    fn abi_v3_bootstraps_with_model_refresh_and_view() {
         let mut core = CoreSession::new(); let batch = dispatch(&mut core, json!({"type":"bootstrap","language":"ko","port":38471}));
-        assert_eq!(batch["abiVersion"], 2); assert!(batch["effects"].as_array().unwrap().iter().any(|effect| effect["type"] == "modelsRefresh")); assert_eq!(core.view_model_value()["settings"]["language"], "ko");
+        assert_eq!(batch["abiVersion"], 3); assert!(batch["effects"].as_array().unwrap().iter().any(|effect| effect["type"] == "modelsRefresh")); assert_eq!(core.view_model_value()["settings"]["language"], "ko");
     }
 
     #[test]
@@ -1068,7 +1064,7 @@ mod tests {
     #[test]
     fn reconnect_backoff_is_owned_by_core() {
         let mut core = CoreSession::new(); core.service_started = true;
-        let first = dispatch(&mut core, json!({"type":"socketClosed"})); let second = dispatch(&mut core, json!({"type":"socketClosed"}));
+        let first = dispatch(&mut core, json!({"type":"transportClosed"})); let second = dispatch(&mut core, json!({"type":"transportClosed"}));
         assert!(first.to_string().contains("1000")); assert!(second.to_string().contains("2000"));
     }
 
@@ -1077,8 +1073,8 @@ mod tests {
         let mut core = CoreSession::new();
         dispatch(&mut core, json!({"type":"bootstrap","appVersion":"1.3.0-test","language":"en","port":38471}));
         core.service_started = true;
-        let opened = dispatch(&mut core, json!({"type":"socketOpened"}));
-        assert_eq!(effect(&opened, "socketSend")["payload"]["clientVersion"], "1.3.0-test");
+        let opened = dispatch(&mut core, json!({"type":"transportOpened"}));
+        assert_eq!(effect(&opened, "transportSend")["payload"]["clientVersion"], "1.3.0-test");
     }
 
     #[test]
@@ -1090,7 +1086,7 @@ mod tests {
     fn fake_host_runs_text_request_to_completion() {
         let mut core = ready_core();
         let accepted = socket(&mut core, reply("text", false, false));
-        assert_eq!(effect(&accepted, "socketSend")["messageType"], "ack");
+        assert_eq!(effect(&accepted, "transportSend")["messageType"], "ack");
         let operation = effect(&accepted, "gemmaInvoke")["operationId"].as_u64().unwrap();
         let delta = dispatch(&mut core, json!({"type":"gemmaDelta","operationId":operation,"chunk":"Hello there."}));
         assert!(effects(&delta).iter().any(|value| value["messageType"] == "reply.text.delta"));
@@ -1098,6 +1094,14 @@ mod tests {
         assert!(effects(&completed).iter().any(|value| value["messageType"] == "reply.text.completed"));
         assert!(effects(&completed).iter().any(|value| value["messageType"] == "reply.completed"));
         assert!(core.active.is_none());
+    }
+
+    #[test]
+    fn consecutive_requests_share_no_hidden_conversation_state() {
+        let mut core=ready_core(); let first=socket(&mut core,reply("stateless-one",false,false)); let first_invoke=effect(&first,"gemmaInvoke").clone(); let operation=first_invoke["operationId"].as_u64().unwrap();
+        dispatch(&mut core,json!({"type":"gemmaCompleted","operationId":operation,"response":"A private prior answer","tokenCount":4,"elapsedMs":1}));
+        let second=socket(&mut core,reply("stateless-two",false,false)); let second_invoke=effect(&second,"gemmaInvoke");
+        assert_eq!(first_invoke["history"],json!([])); assert_eq!(second_invoke["history"],json!([])); assert!(!second_invoke.to_string().contains("A private prior answer"));
     }
 
     #[test]
@@ -1149,7 +1153,7 @@ mod tests {
         assert!(!effects(&first_audio).iter().any(|value| value["messageType"] == "reply.audio.chunk"), "PCM transport must remain deferred: {first_audio}");
 
         let first_transport = take_audio_transport(&mut core, &first_audio);
-        assert_eq!(effect(&first_transport, "socketSend")["messageType"], "reply.audio.start");
+        assert_eq!(effect(&first_transport, "transportSend")["messageType"], "reply.audio.start");
         let first_chunk = effects(&first_transport).iter().find(|value| value["messageType"] == "reply.audio.chunk").unwrap();
         assert_eq!(first_chunk["payload"]["sequence"], 0);
         assert_eq!(first_chunk["payload"]["segmentSequence"], 0);
@@ -1180,7 +1184,7 @@ mod tests {
     #[test]
     fn voice_capture_flows_through_typed_audio_and_stt() {
         let mut core = ready_core();
-        let mut start = envelope("voice.capture.start", "voice"); start.as_object_mut().unwrap().extend(json!({"requestId":"voice","eventId":"e-voice","integrationId":"mock-game","characterId":"rika","output":{"modalities":["text"],"language":"en"},"card":transfer(),"debug":{"echoCapturedAudio":true,"echoTranscript":true}}).as_object().unwrap().clone());
+        let mut start = envelope("voice.capture.start", "voice"); start.as_object_mut().unwrap().extend(json!({"requestId":"voice","eventId":"e-voice","integrationId":"mock-game","characterId":"rika","output":{"modalities":["text"],"language":"en"},"card":transfer(),"returnTranscript":true,"debug":{"echoCapturedAudio":true}}).as_object().unwrap().clone());
         let accepted = socket(&mut core, start); assert_eq!(effect(&accepted, "captureStart")["requestId"], "voice");
         let mut stop = envelope("voice.capture.stop", "stop"); stop.as_object_mut().unwrap().insert("requestId".into(), json!("voice")); let stopping = socket(&mut core, stop); assert_eq!(effect(&stopping, "captureStop")["requestId"], "voice");
         let captured = serde_json::from_str::<Value>(&core.dispatch_audio(&json!({"type":"captureCompleted","requestId":"voice"}).to_string(), vec![0.2; 1600]).unwrap()).unwrap();
