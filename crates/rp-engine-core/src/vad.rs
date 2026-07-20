@@ -44,7 +44,7 @@ impl VadStateCore {
     }
 }
 
-impl Default for VadStateCore { fn default() -> Self { Self::new(0.5, 0.20, 0.25, 0.50) } }
+impl Default for VadStateCore { fn default() -> Self { Self::new(0.5, 0.20, 0.25, 0.10) } }
 
 #[wasm_bindgen]
 pub struct CmvnCore { means: Vec<f32>, inverse_std: Vec<f32> }

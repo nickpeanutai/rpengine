@@ -6,6 +6,90 @@ use wasm_bindgen::prelude::*;
 const MAX_STT_SECONDS: usize = 30;
 const PCM_CHUNK_BYTES: usize = 32 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AudioProcessingProfile {
+    NarrowbandVoice,
+}
+
+impl AudioProcessingProfile {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "narrowband_voice" => Some(Self::NarrowbandVoice),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BiquadKind { HighPass, LowPass }
+
+fn biquad(samples: &mut [f32], sample_rate: f64, frequency: f64, q: f64, kind: BiquadKind) {
+    if samples.is_empty() || sample_rate <= 0.0 { return; }
+    let omega = std::f64::consts::TAU * frequency / sample_rate;
+    let cosine = omega.cos();
+    let alpha = omega.sin() / (2.0 * q);
+    let (b0, b1, b2) = match kind {
+        BiquadKind::LowPass => ((1.0 - cosine) / 2.0, 1.0 - cosine, (1.0 - cosine) / 2.0),
+        BiquadKind::HighPass => ((1.0 + cosine) / 2.0, -(1.0 + cosine), (1.0 + cosine) / 2.0),
+    };
+    let a0 = 1.0 + alpha;
+    let a1 = -2.0 * cosine / a0;
+    let a2 = (1.0 - alpha) / a0;
+    let b0 = b0 / a0;
+    let b1 = b1 / a0;
+    let b2 = b2 / a0;
+    let (mut x1, mut x2, mut y1, mut y2) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+    for sample in samples {
+        let x = *sample as f64;
+        let y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1; x1 = x; y2 = y1; y1 = y;
+        *sample = y as f32;
+    }
+}
+
+fn compress_and_saturate(samples: &mut [f32], sample_rate: f64) {
+    if samples.is_empty() || sample_rate <= 0.0 { return; }
+    let threshold = 10.0_f64.powf(-18.0 / 20.0);
+    let makeup = 10.0_f64.powf(3.0 / 20.0);
+    let attack = (-1.0 / (0.005 * sample_rate)).exp();
+    let release = (-1.0 / (0.080 * sample_rate)).exp();
+    let drive = 1.5_f64;
+    let saturation_scale = drive.tanh();
+    let mut envelope = 0.0_f64;
+    for sample in samples.iter_mut() {
+        let level = (*sample as f64).abs();
+        let coefficient = if level > envelope { attack } else { release };
+        envelope = coefficient * envelope + (1.0 - coefficient) * level;
+        let gain = if envelope > threshold {
+            let over_db = 20.0 * (envelope / threshold).log10();
+            10.0_f64.powf((-(1.0 - 1.0 / 3.0) * over_db) / 20.0)
+        } else { 1.0 };
+        let saturated = ((*sample as f64) * gain * makeup * drive).tanh() / saturation_scale;
+        *sample = saturated.clamp(-0.95, 0.95) as f32;
+    }
+    let fade_samples = (sample_rate * 0.005).round() as usize;
+    let fade_samples = fade_samples.min(samples.len() / 2);
+    for index in 0..fade_samples {
+        let gain = index as f32 / fade_samples.max(1) as f32;
+        samples[index] *= gain;
+        let end = samples.len() - 1 - index;
+        samples[end] *= gain;
+    }
+}
+
+pub(crate) fn process_output_audio(samples: &[f32], sample_rate: u32, profile: AudioProcessingProfile) -> Vec<f32> {
+    let mut output = samples.to_vec();
+    match profile {
+        AudioProcessingProfile::NarrowbandVoice => {
+            let sample_rate = sample_rate as f64;
+            biquad(&mut output, sample_rate, 300.0, 0.707, BiquadKind::HighPass);
+            biquad(&mut output, sample_rate, 3_400.0, 0.707, BiquadKind::LowPass);
+            compress_and_saturate(&mut output, sample_rate);
+        }
+    }
+    output
+}
+
 #[wasm_bindgen]
 pub fn float32_to_pcm16(samples: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(samples.len() * 2);
@@ -150,4 +234,35 @@ mod tests {
     #[test] fn encodes_pcm() { assert_eq!(float32_to_pcm16(&[-1.0, 0.0, 1.0]), vec![0, 128, 0, 0, 255, 127]); }
     #[test] fn trims_padding() { let mut samples = vec![0.0_f64; 20]; samples.extend(vec![0.5; 20]); samples.extend(vec![0.0; 20]); assert!(trim_outer_silence(&samples, 100.0, r#"{"windowDuration":0.1,"hopDuration":0.1,"leadingPaddingDuration":0.0,"trailingPaddingDuration":0.0}"#).unwrap().len() < samples.len()); }
     #[test] fn merges_text() { assert_eq!(merge_event_text(Some("Hi".into()), Some("there".into())).unwrap(), "Hi\n\nSpoken input from the player:\nthere"); }
+
+    fn sine(frequency: f64, seconds: f64) -> Vec<f32> {
+        let count = (44_100.0 * seconds) as usize;
+        (0..count).map(|index| (std::f64::consts::TAU * frequency * index as f64 / 44_100.0).sin() as f32 * 0.1).collect()
+    }
+
+    fn rms(samples: &[f32]) -> f64 {
+        (samples.iter().map(|sample| (*sample as f64).powi(2)).sum::<f64>() / samples.len() as f64).sqrt()
+    }
+
+    #[test]
+    fn narrowband_voice_is_deterministic_finite_and_length_preserving() {
+        let input = sine(1_000.0, 0.25);
+        let first = process_output_audio(&input, 44_100, AudioProcessingProfile::NarrowbandVoice);
+        let second = process_output_audio(&input, 44_100, AudioProcessingProfile::NarrowbandVoice);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), input.len());
+        assert!(first.iter().all(|sample| sample.is_finite() && sample.abs() <= 0.95));
+        assert_eq!(first[0], 0.0);
+        assert!(first[first.len() - 1].abs() < 0.001);
+    }
+
+    #[test]
+    fn narrowband_voice_attenuates_out_of_band_frequencies() {
+        let low = process_output_audio(&sine(100.0, 1.0), 44_100, AudioProcessingProfile::NarrowbandVoice);
+        let middle = process_output_audio(&sine(1_000.0, 1.0), 44_100, AudioProcessingProfile::NarrowbandVoice);
+        let high = process_output_audio(&sine(8_000.0, 1.0), 44_100, AudioProcessingProfile::NarrowbandVoice);
+        let middle_rms = rms(&middle[2_205..]);
+        assert!(rms(&low[2_205..]) < middle_rms * 0.25);
+        assert!(rms(&high[2_205..]) < middle_rms * 0.25);
+    }
 }

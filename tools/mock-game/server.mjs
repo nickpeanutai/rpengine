@@ -132,7 +132,7 @@ async function submitReply(input, forcedSnapshot = false, existing) {
     },
     output: input.outputMode === 'text'
       ? { modalities: ['text'], language: input.language || 'en' }
-      : { modalities: ['text', 'audio'], language: input.language || 'en', audio: { model: 'gemtavern-supertonic-3', voice: input.voiceId || 'F4', format: 'pcm_s16le' } },
+      : { modalities: ['text', 'audio'], language: input.language || 'en', audio: { model: 'gemtavern-supertonic-3', voice: input.voiceId || 'F4', format: 'pcm_s16le', ...(input.processingProfile ? { processing: { profile: input.processingProfile } } : {}) } },
     player: { displayName: input.playerName || 'Player' }, card: transfer.descriptor,
   };
   pending.set(requestId, { kind: 'reply', requestId, eventId, input, card, request });
@@ -159,7 +159,7 @@ async function submitVoiceCapture(input, forcedSnapshot = false, existing) {
     requestId, eventId, integrationId: 'mock-game', characterId: input.characterId || 'mock-character-1',
     output: input.outputMode === 'text'
       ? { modalities: ['text'], language: input.language || 'en' }
-      : { modalities: ['text', 'audio'], language: input.language || 'en', audio: { model: 'gemtavern-supertonic-3', voice: input.voiceId || 'F4', format: 'pcm_s16le' } },
+      : { modalities: ['text', 'audio'], language: input.language || 'en', audio: { model: 'gemtavern-supertonic-3', voice: input.voiceId || 'F4', format: 'pcm_s16le', ...(input.processingProfile ? { processing: { profile: input.processingProfile } } : {}) } },
     player: { displayName: input.playerName || 'Player' }, card: transfer.descriptor,
     debug: { echoCapturedAudio: true, echoTranscript: true },
   };

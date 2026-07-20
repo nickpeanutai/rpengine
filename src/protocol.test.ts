@@ -36,6 +36,19 @@ describe('RPEngine protocol v3', () => {
     expect(decodeEnvelope(JSON.stringify(start)).type).toBe('voice.capture.start');
     expect(decodeEnvelope(JSON.stringify({ protocol: 'gemtavern.rp_engine', protocolVersion: 3, type: 'voice.capture.stop', messageId: 'm2', timestamp: '2026-07-14T00:00:00.000Z', requestId: 'r1' })).type).toBe('voice.capture.stop');
   });
+  it('accepts the optional narrowband voice profile for reply and capture requests', () => {
+    const output = { ...base.output, audio: { ...base.output.audio, processing: { profile: 'narrowband_voice' } } };
+    expect(decodeEnvelope(JSON.stringify({ ...base, output })).type).toBe('reply.request');
+    const start = { ...base, type: 'voice.capture.start', output };
+    delete (start as { event?: unknown }).event;
+    expect(decodeEnvelope(JSON.stringify(start)).type).toBe('voice.capture.start');
+  });
+  it('rejects malformed and unknown audio processing profiles', () => {
+    const audio = { ...base.output.audio, processing: 'narrowband_voice' };
+    expect(() => decodeEnvelope(JSON.stringify({ ...base, output: { ...base.output, audio } }))).toThrow(/must be an object/);
+    const unknown = { ...base.output.audio, processing: { profile: 'radio' } };
+    expect(() => decodeEnvelope(JSON.stringify({ ...base, output: { ...base.output, audio: unknown } }))).toThrow(/processing profile/);
+  });
   it('accepts only supported voice silence behaviors', () => {
     const start = { ...base, ...promptContext, protocol: 'gemtavern.rp_engine', type: 'voice.capture.start', silenceBehavior: 'restart' };
     delete (start as { event?: unknown }).event;

@@ -6,6 +6,7 @@ export const FILE_MANIFEST_VERSION = 1;
 export const ACTIVE_POLL_MS = 50;
 export const IDLE_POLL_MS = 250;
 export const TEXT_DELTA_BATCH_MS = 120;
+export const VOICE_LEVEL_BATCH_MS = 250;
 const STALE_MS = 24 * 60 * 60 * 1000;
 
 interface PendingTextDelta {
@@ -13,6 +14,14 @@ interface PendingTextDelta {
   payload: Record<string, unknown>;
   delta: string;
   timer: number;
+}
+
+interface PendingVoiceLevel {
+  sessionId?: string;
+  payload: Record<string, unknown>;
+  timer?: number;
+  queued: boolean;
+  dirty: boolean;
 }
 
 interface MailboxManifest {
@@ -38,6 +47,7 @@ export class FileSystemMailboxAdapter implements TransportAdapter {
   private audioExhausted = false;
   private readonly outgoing = new Map<string, string>();
   private readonly pendingTextDeltas = new Map<string, PendingTextDelta>();
+  private readonly pendingVoiceLevels = new Map<string, PendingVoiceLevel>();
   private readonly textBatchSequences = new Map<string, number>();
   private lastWriteTimestamp = 0;
   private writeChain: Promise<void> = Promise.resolve();
@@ -79,13 +89,16 @@ export class FileSystemMailboxAdapter implements TransportAdapter {
     if (this.timer !== undefined) window.clearTimeout(this.timer);
     this.timer = undefined;
     this.clearTextDeltas();
+    this.clearVoiceLevels();
     if (notify) this.events.closed(1000, reason);
   }
 
   send(type: string, sessionId: string | undefined, payload: Record<string, unknown>) {
+    const requestId = typeof payload.requestId === 'string' ? payload.requestId : undefined;
+    if (type === 'voice.capture.level') return this.bufferVoiceLevel(sessionId, payload);
+    if (requestId) this.dropVoiceLevel(requestId);
     if (type === 'reply.text.delta') return this.bufferTextDelta(sessionId, payload);
     return this.enqueue(async () => {
-      const requestId = typeof payload.requestId === 'string' ? payload.requestId : undefined;
       if (requestId && isTextTerminal(type)) await this.flushTextDeltaNow(requestId);
       const sent = await this.sendNow(type, sessionId, payload);
       if (requestId && isTextTerminal(type)) this.textBatchSequences.delete(requestId);
@@ -121,6 +134,60 @@ export class FileSystemMailboxAdapter implements TransportAdapter {
     this.textBatchSequences.clear();
   }
 
+  private bufferVoiceLevel(sessionId: string | undefined, payload: Record<string, unknown>) {
+    if (!this.connected) return false;
+    const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
+    if (!requestId) return this.enqueue(() => this.sendNow('voice.capture.level', sessionId, payload));
+    const pending = this.pendingVoiceLevels.get(requestId);
+    if (pending) {
+      pending.sessionId = sessionId;
+      pending.payload = { ...payload };
+      pending.dirty = true;
+      return true;
+    }
+    const next: PendingVoiceLevel = { sessionId, payload: { ...payload }, queued: false, dirty: false };
+    this.pendingVoiceLevels.set(requestId, next);
+    this.scheduleVoiceLevel(requestId, VOICE_LEVEL_BATCH_MS);
+    return true;
+  }
+
+  private scheduleVoiceLevel(requestId: string, delay: number) {
+    const pending = this.pendingVoiceLevels.get(requestId);
+    if (!pending || pending.timer !== undefined || pending.queued) return;
+    pending.timer = window.setTimeout(() => {
+      const current = this.pendingVoiceLevels.get(requestId);
+      if (!current) return;
+      current.timer = undefined;
+      current.queued = true;
+      void this.enqueue(() => this.flushVoiceLevelNow(requestId));
+    }, delay);
+  }
+
+  private async flushVoiceLevelNow(requestId: string) {
+    const pending = this.pendingVoiceLevels.get(requestId);
+    if (!pending) return true;
+    pending.dirty = false;
+    const startedAt = performance.now();
+    const sent = await this.sendNow('voice.capture.level', pending.sessionId, pending.payload);
+    if (this.pendingVoiceLevels.get(requestId) !== pending) return sent;
+    pending.queued = false;
+    if (!pending.dirty) this.pendingVoiceLevels.delete(requestId);
+    else this.scheduleVoiceLevel(requestId, Math.max(0, VOICE_LEVEL_BATCH_MS - (performance.now() - startedAt)));
+    return sent;
+  }
+
+  private dropVoiceLevel(requestId: string) {
+    const pending = this.pendingVoiceLevels.get(requestId);
+    if (!pending) return;
+    if (pending.timer !== undefined) window.clearTimeout(pending.timer);
+    this.pendingVoiceLevels.delete(requestId);
+  }
+
+  private clearVoiceLevels() {
+    for (const pending of this.pendingVoiceLevels.values()) if (pending.timer !== undefined) window.clearTimeout(pending.timer);
+    this.pendingVoiceLevels.clear();
+  }
+
   private async sendNow(type: string, sessionId: string | undefined, payload: Record<string, unknown>) {
     if (!this.connected || !this.outbound) return false;
     try {
@@ -143,6 +210,7 @@ export class FileSystemMailboxAdapter implements TransportAdapter {
   sendAudioSegment(segment: ReplyAudioSegment) {
     if (!this.manifest || !this.audio || this.audioExhausted) return false;
     if (this.nextSlot >= this.manifest.audio.slotCount) { this.audioExhausted = true; return false; }
+    this.dropVoiceLevel(segment.requestId);
     return this.enqueue(async () => { await this.flushTextDeltaNow(segment.requestId); return this.sendAudioNow(segment); }).catch(error => { this.events.error(error instanceof Error ? error.message : String(error)); return false; });
   }
 

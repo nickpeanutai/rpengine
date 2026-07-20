@@ -26,6 +26,7 @@
           <label class="wide">Optional audio input<input id="eventAudio" type="file" accept="audio/*"><small>The mock adapter decodes and resamples the file to 16 kHz mono PCM16 before sending it.</small></label>
           <label>Card transfer<select id="transferMode"><option value="snapshot">Snapshot</option><option value="patch">Patch</option><option value="reference">Reference</option></select></label>
           <label>Modalities<select id="outputMode"><option value="voice">Text + Supertonic 3 audio</option><option value="text">Text only</option></select></label>
+          <label>Audio processing<select id="processingProfile"><option value="">Natural voice</option><option value="narrowband_voice">Narrowband voice</option></select></label>
           <label>Language<select id="language"><option value="en">English</option><option value="ar">Arabic</option><option value="es">Spanish</option><option value="ja">Japanese</option><option value="ko">Korean</option><option value="vi">Vietnamese</option><option value="uk">Ukrainian</option><option value="zh">Chinese</option></select></label><label>Voice<input id="voiceId" value="F4"></label>
         </div>
         <div class="actions"><button id="send">Send reply.request</button><button id="cancel" class="danger">Cancel active request</button></div>

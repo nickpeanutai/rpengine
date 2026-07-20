@@ -41,9 +41,9 @@ describe('mock-game browser voice capture', () => {
     await waitForState(controlPort, value => value.capacity.acceptingRequests === true);
 
     const startPromise = message(socket);
-    const firstStartResponse = await post(controlPort, '/api/voice/start', input());
+    const firstStartResponse = await post(controlPort, '/api/voice/start', input({ outputMode: 'voice', processingProfile: 'narrowband_voice' }));
     const firstStart = await startPromise;
-    expect(firstStart).toMatchObject({ type: 'voice.capture.start', requestId: firstStartResponse.requestId, output: { modalities: ['text'], language: 'en' }, debug: { echoCapturedAudio: true, echoTranscript: true } });
+    expect(firstStart).toMatchObject({ type: 'voice.capture.start', requestId: firstStartResponse.requestId, output: { modalities: ['text', 'audio'], language: 'en', audio: { processing: { profile: 'narrowband_voice' } } }, debug: { echoCapturedAudio: true, echoTranscript: true } });
     expect(() => decode_envelope(JSON.stringify(firstStart))).not.toThrow();
 
     socket.send(JSON.stringify(envelope('voice.capture.state', { sessionId: welcome.sessionId, requestId: firstStart.requestId, state: 'speech_started', seconds: 0.4, autoEndEnabled: true })));
@@ -168,8 +168,8 @@ describe('mock-game filesystem transport', () => {
   });
 });
 
-function input() {
-  return { characterName: 'Ari', playerName: 'Morgan', description: 'Station engineer', personality: 'Calm', scenario: 'A test', transferMode: 'snapshot', outputMode: 'text', language: 'en', voiceId: 'F4' };
+function input(overrides: Record<string, unknown> = {}) {
+  return { characterName: 'Ari', playerName: 'Morgan', description: 'Station engineer', personality: 'Calm', scenario: 'A test', transferMode: 'snapshot', outputMode: 'text', language: 'en', voiceId: 'F4', ...overrides };
 }
 
 function envelope(type: string, payload: Record<string, unknown> = {}) {

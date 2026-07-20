@@ -99,6 +99,7 @@ export interface ReplyRequestEnvelope extends EnvelopeBase {
       model: typeof SUPERTONIC_MODEL_ID;
       voice: string;
       format?: 'pcm_s16le';
+      processing?: { profile: 'narrowband_voice' };
     };
   };
   player?: { displayName?: string };

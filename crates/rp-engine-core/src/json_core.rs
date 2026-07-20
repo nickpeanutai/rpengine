@@ -244,6 +244,10 @@ fn validate_output(value: Option<&Value>) -> Result<(), String> {
         let audio = output.get("audio").and_then(Value::as_object).ok_or("Audio output requires a Supertonic 3 model and voice descriptor.")?;
         if audio.get("model").and_then(Value::as_str) != Some("gemtavern-supertonic-3") || audio.get("voice").and_then(Value::as_str).unwrap_or_default().trim().is_empty() { return Err("Audio output requires a Supertonic 3 model and voice descriptor.".into()); }
         if audio.get("format").is_some_and(|value| value.as_str() != Some("pcm_s16le")) { return Err("Unsupported audio output format.".into()); }
+        if let Some(processing) = audio.get("processing") {
+            let processing = processing.as_object().ok_or("output.audio.processing must be an object.")?;
+            if processing.get("profile").and_then(Value::as_str) != Some("narrowband_voice") { return Err("Unsupported audio processing profile.".into()); }
+        }
     } else if output.contains_key("audio") { return Err("output.audio requires the audio modality.".into()); }
     if output.get("language").and_then(Value::as_str).unwrap_or_default().trim().is_empty() { return Err("reply.request output.language is required.".into()); }
     Ok(())

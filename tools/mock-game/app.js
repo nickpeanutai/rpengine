@@ -79,7 +79,7 @@ function commonForm() {
     characterName: $('#characterName').value, playerName: $('#playerName').value,
     description: $('#description').value, personality: $('#personality').value, scenario: $('#scenario').value,
     transferMode: $('#transferMode').value, outputMode: $('#outputMode').value,
-    language: $('#language').value, voiceId: $('#voiceId').value,
+    language: $('#language').value, voiceId: $('#voiceId').value, processingProfile: $('#processingProfile').value,
   };
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ACTIVE_POLL_MS, FILE_MANIFEST_SCHEMA, FILE_MANIFEST_VERSION, FileSystemMailboxAdapter, IDLE_POLL_MS, pcm16Wav, readyStems, recoverOutgoing, TEXT_DELTA_BATCH_MS, writeImmutable } from './filesystem-mailbox-adapter';
+import { ACTIVE_POLL_MS, FILE_MANIFEST_SCHEMA, FILE_MANIFEST_VERSION, FileSystemMailboxAdapter, IDLE_POLL_MS, pcm16Wav, readyStems, recoverOutgoing, TEXT_DELTA_BATCH_MS, VOICE_LEVEL_BATCH_MS, writeImmutable } from './filesystem-mailbox-adapter';
 
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -10,6 +10,7 @@ describe('filesystem mailbox primitives', () => {
     expect(ACTIVE_POLL_MS).toBe(50);
     expect(IDLE_POLL_MS).toBe(250);
     expect(TEXT_DELTA_BATCH_MS).toBe(120);
+    expect(VOICE_LEVEL_BATCH_MS).toBe(250);
   });
 
   it('writes a valid mono PCM16 WAV', () => {
@@ -108,6 +109,46 @@ describe('filesystem mailbox primitives', () => {
     await vi.advanceTimersByTimeAsync(TEXT_DELTA_BATCH_MS);
     await (adapter as any).writeChain;
     expect(envelopes(directory.files).map(envelope => envelope.type)).toEqual(['reply.accepted', 'reply.text.delta']);
+    adapter.disconnect('test complete', false);
+  });
+
+  it('coalesces filesystem voice levels to the latest sample', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const directory = memoryDirectory();
+    const adapter = new FileSystemMailboxAdapter(undefined, { opened() {}, message() {}, closed() {}, error() {} });
+    Object.assign(adapter as unknown as Record<string, unknown>, { connected: true, outbound: directory.handle });
+
+    adapter.send('voice.capture.level', 'session', { requestId: 'request-1', seconds: 0.1, peak: 0.1, rms: 0.01 });
+    adapter.send('voice.capture.level', 'session', { requestId: 'request-1', seconds: 0.2, peak: 0.5, rms: 0.2 });
+    adapter.send('voice.capture.level', 'session', { requestId: 'request-1', seconds: 0.3, peak: 0.8, rms: 0.3 });
+    await vi.advanceTimersByTimeAsync(VOICE_LEVEL_BATCH_MS);
+    await (adapter as any).writeChain;
+
+    expect(envelopes(directory.files)).toEqual([
+      expect.objectContaining({ type: 'voice.capture.level', requestId: 'request-1', seconds: 0.3, peak: 0.8, rms: 0.3 }),
+    ]);
+    adapter.disconnect('test complete', false);
+  });
+
+  it('drops queued level telemetry before a capture-state barrier', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+    const directory = memoryDirectory();
+    const gate = deferred<void>();
+    const adapter = new FileSystemMailboxAdapter(undefined, { opened() {}, message() {}, closed() {}, error() {} });
+    Object.assign(adapter as unknown as Record<string, unknown>, { connected: true, outbound: directory.handle, writeChain: gate.promise });
+
+    adapter.send('voice.capture.level', 'session', { requestId: 'request-1', seconds: 0.1, peak: 0.7, rms: 0.2 });
+    await vi.advanceTimersByTimeAsync(VOICE_LEVEL_BATCH_MS);
+    adapter.send('voice.capture.level', 'session', { requestId: 'request-1', seconds: 0.2, peak: 0.8, rms: 0.3 });
+    const ended = adapter.send('voice.capture.state', 'session', { requestId: 'request-1', state: 'speech_ended', seconds: 0.2 });
+    gate.resolve();
+    await ended;
+
+    expect(envelopes(directory.files)).toEqual([
+      expect.objectContaining({ type: 'voice.capture.state', requestId: 'request-1', state: 'speech_ended' }),
+    ]);
     adapter.disconnect('test complete', false);
   });
 

@@ -1,6 +1,6 @@
 use crate::{
     assemble_prompt_value, base64_bytes, decode_audio_input_inner, display_text_inner, float32_to_pcm16,
-    js_error, parse_json, synthesis_text_inner, validate_envelope_value,
+    js_error, parse_json, process_output_audio, synthesis_text_inner, validate_envelope_value, AudioProcessingProfile,
     CardSessionCore, DisplayTextStreamCore, SpeechChunkerCore,
 };
 use serde::Serialize;
@@ -85,6 +85,7 @@ struct QueuedReply { envelope: Value, card: Value }
 struct SpeechState {
     language: String,
     voice: String,
+    processing: Option<AudioProcessingProfile>,
     expression_tags: Vec<String>,
     chunker: SpeechChunkerCore,
     pending: VecDeque<(u32, String)>,
@@ -125,6 +126,7 @@ enum SttTarget { Reply(String), Capture(String) }
 #[derive(Clone)]
 struct ReplyAudioTransportJob {
     samples: Vec<f32>,
+    processing: Option<AudioProcessingProfile>,
     request_id: String,
     session_id: Option<String>,
     sample_rate: u32,
@@ -252,7 +254,9 @@ impl CoreSession {
 
     pub fn take_reply_audio_segment(&mut self, transport_id: u32) -> Result<String, JsError> {
         let job = self.reply_audio_transports.remove(&transport_id).ok_or_else(|| js_error(format!("Unknown or consumed reply audio transport: {transport_id}")))?;
-        let pcm = float32_to_pcm16(&job.samples);
+        let processed;
+        let samples = if let Some(profile) = job.processing { processed = process_output_audio(&job.samples, job.sample_rate, profile); processed.as_slice() } else { job.samples.as_slice() };
+        let pcm = float32_to_pcm16(samples);
         serde_json::to_string(&json!({
             "requestId": job.request_id, "sessionId": job.session_id, "sampleRate": job.sample_rate,
             "channels": 1, "segmentSequence": job.segment_sequence, "spokenText": job.spoken_text,
@@ -263,7 +267,9 @@ impl CoreSession {
 
     pub fn take_reply_audio_transport(&mut self, transport_id: u32) -> Result<String, JsError> {
         let job = self.reply_audio_transports.remove(&transport_id).ok_or_else(|| js_error(format!("Unknown or consumed reply audio transport: {transport_id}")))?;
-        let pcm = float32_to_pcm16(&job.samples);
+        let processed;
+        let samples = if let Some(profile) = job.processing { processed = process_output_audio(&job.samples, job.sample_rate, profile); processed.as_slice() } else { job.samples.as_slice() };
+        let pcm = float32_to_pcm16(samples);
         let chunks = pcm.chunks(PCM_CHUNK_BYTES).collect::<Vec<_>>();
         let mut effects = Vec::with_capacity(chunks.len() + usize::from(job.send_start));
         if job.send_start { effects.push(CoreEffectV2::TransportSend { message_type: "reply.audio.start".into(), payload: json!({ "requestId":job.request_id, "format":"pcm_s16le", "sampleRate":job.sample_rate, "channels":1 }), session_id: job.session_id.clone() }); }
@@ -665,10 +671,11 @@ impl CoreSession {
         let source_message_id = envelope.get("messageId").and_then(Value::as_str).unwrap_or_default().to_string();
         let language = envelope.pointer("/output/language").and_then(Value::as_str).unwrap_or("en").to_string();
         let voice = envelope.pointer("/output/audio/voice").and_then(Value::as_str).unwrap_or("F4").to_string();
+        let processing = envelope.pointer("/output/audio/processing/profile").and_then(Value::as_str).and_then(AudioProcessingProfile::from_name);
         let wants_audio = envelope.pointer("/output/modalities").and_then(Value::as_array).is_some_and(|values| values.iter().any(|value| value.as_str() == Some("audio")));
         if !supported_tts_language(&language) { self.request_error_code(Some(&request_id), &source_message_id, "unsupported_language", format!("Unsupported language: {language}"), effects); self.start_next_reply(effects); return; }
         if !supported_voice(&voice) { self.request_error_code(Some(&request_id), &source_message_id, "unsupported_voice", format!("Unsupported voice: {voice}"), effects); self.start_next_reply(effects); return; }
-        let speech = wants_audio.then(|| SpeechState { language, voice, expression_tags: self.expression_tags.clone(), chunker: SpeechChunkerCore::new(1), pending: VecDeque::new(), inflight: None, started: false, audio_sequence: 0, segment_count: 0, total_chunks: 0, total_bytes: 0, duration_seconds: 0.0, elapsed_ms: 0.0 });
+        let speech = wants_audio.then(|| SpeechState { language, voice, processing, expression_tags: self.expression_tags.clone(), chunker: SpeechChunkerCore::new(1), pending: VecDeque::new(), inflight: None, started: false, audio_sequence: 0, segment_count: 0, total_chunks: 0, total_bytes: 0, duration_seconds: 0.0, elapsed_ms: 0.0 });
         self.active = Some(ActiveReply { request_id: request_id.clone(), source_message_id, envelope, card: queued.card, raw: String::new(), clean: String::new(), delta_sequence: 0, display: DisplayTextStreamCore::new(), transcript: None, stt_operation: None, gemma_operation: None, gemma_done: false, text_completed: false, speech });
         let audio = self.active.as_ref().and_then(|active| active.envelope.pointer("/event/audio")).cloned();
         if let Some(audio) = audio {
@@ -720,7 +727,16 @@ impl CoreSession {
         match target {
             SttTarget::Reply(request_id) => { if self.active.as_ref().is_some_and(|active| active.request_id == request_id && active.stt_operation == Some(operation)) { self.begin_gemma(Some(text), effects); } }
             SttTarget::Capture(request_id) => {
-                let Some(capture) = self.capture.take().filter(|capture| capture.envelope.get("requestId").and_then(Value::as_str) == Some(&request_id) && capture.operation == Some(operation)) else { return; };
+                let Some(mut capture) = self.capture.take().filter(|capture| capture.envelope.get("requestId").and_then(Value::as_str) == Some(&request_id) && capture.operation == Some(operation)) else { return; };
+                if text.is_empty() && capture.envelope.get("silenceBehavior").and_then(Value::as_str) == Some("restart") {
+                    capture.phase = CapturePhase::Capturing;
+                    capture.operation = None;
+                    self.capture = Some(capture);
+                    self.send(effects, "voice.capture.state", json!({ "requestId":request_id, "state":"listening", "seconds":0, "autoEndEnabled":true, "message":"No speech was recognized; listening again." }));
+                    effects.push(CoreEffectV2::CaptureStart { request_id, restart_on_silence: true });
+                    self.publish_capacity(effects);
+                    return;
+                }
                 if capture.envelope.get("returnTranscript").and_then(Value::as_bool) == Some(true) {
                     self.send(effects, "voice.capture.transcript", json!({ "requestId":request_id, "text":text, "language":self.selected_language, "elapsedMs":object.get("elapsedMs").and_then(Value::as_f64).unwrap_or(0.0) }));
                 }
@@ -801,6 +817,7 @@ impl CoreSession {
         speech.inflight = None;
         let transport_id = self.store_reply_audio_transport(ReplyAudioTransportJob {
             samples,
+            processing: speech.processing,
             request_id: active.request_id.clone(),
             session_id: self.session_id.clone(),
             sample_rate: sample_rate as u32,
@@ -1136,6 +1153,33 @@ mod tests {
         for message in ["reply.audio.completed", "reply.completed"] { assert!(effects(&audio).iter().any(|value| value["messageType"] == message), "missing {message}: {audio}"); }
     }
 
+    fn one_audio_segment(core: &mut CoreSession, request: Value, samples: Vec<f32>) -> Value {
+        let accepted = socket(core, request);
+        let gemma_operation = effect(&accepted, "gemmaInvoke")["operationId"].as_u64().unwrap();
+        dispatch(core, json!({"type":"gemmaDelta","operationId":gemma_operation,"chunk":"Hi."}));
+        let generated = dispatch(core, json!({"type":"gemmaCompleted","operationId":gemma_operation,"response":"Hi.","tokenCount":1,"elapsedMs":1}));
+        let tts_operation = effect(&generated, "ttsInvoke")["operationId"].as_u64().unwrap();
+        let audio = serde_json::from_str::<Value>(&core.dispatch_audio(&json!({"type":"ttsCompleted","operationId":tts_operation,"sampleRate":44100,"duration":samples.len() as f64 / 44100.0,"elapsedMs":1}).to_string(), samples).unwrap()).unwrap();
+        let transport_id = effect(&audio, "replyAudioTransport")["transportId"].as_u64().unwrap() as u32;
+        serde_json::from_str(&core.take_reply_audio_segment(transport_id).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn audio_processing_is_opt_in_and_preserves_transport_metadata() {
+        let samples = (0..4_410).map(|index| (std::f64::consts::TAU * 1_000.0 * index as f64 / 44_100.0).sin() as f32 * 0.1).collect::<Vec<_>>();
+        let expected = base64_bytes(&float32_to_pcm16(&samples));
+        let natural = one_audio_segment(&mut ready_core(), reply("natural", false, true), samples.clone());
+        assert_eq!(natural["pcm16Base64"], expected, "omitting processing must preserve legacy PCM");
+
+        let mut processed_request = reply("processed", false, true);
+        processed_request.pointer_mut("/output/audio").unwrap().as_object_mut().unwrap().insert("processing".into(), json!({"profile":"narrowband_voice"}));
+        let processed = one_audio_segment(&mut ready_core(), processed_request, samples);
+        assert_ne!(processed["pcm16Base64"], expected);
+        for key in ["sampleRate", "channels", "segmentSequence", "spokenText", "durationSeconds", "firstAudioSequence", "sendStart", "byteLength"] {
+            assert_eq!(processed[key], natural[key], "processing changed transport metadata {key}");
+        }
+    }
+
     #[test]
     fn revised_generated_prefix_fails_an_audio_reply() {
         let mut core = ready_core();
@@ -1216,8 +1260,31 @@ mod tests {
     #[test]
     fn voice_capture_can_opt_into_silent_window_restarts() {
         let mut core = ready_core();
-        let mut start = envelope("voice.capture.start", "restart-voice"); start.as_object_mut().unwrap().extend(json!({"requestId":"restart-voice","eventId":"e-restart-voice","integrationId":"unknown-radio","characterId":"operator","output":{"modalities":["text"],"language":"en"},"card":transfer(),"silenceBehavior":"restart"}).as_object().unwrap().clone());
+        let mut start = envelope("voice.capture.start", "restart-voice"); start.as_object_mut().unwrap().extend(json!({"requestId":"restart-voice","eventId":"e-restart-voice","integrationId":"unknown-radio","characterId":"operator","output":{"modalities":["text"],"language":"en"},"card":transfer(),"silenceBehavior":"restart","returnTranscript":true}).as_object().unwrap().clone());
         let accepted = socket(&mut core, start); assert_eq!(effect(&accepted, "captureStart")["restartOnSilence"], true);
+        let mut stop = envelope("voice.capture.stop", "restart-stop"); stop.as_object_mut().unwrap().insert("requestId".into(), json!("restart-voice")); socket(&mut core, stop);
+        let captured = serde_json::from_str::<Value>(&core.dispatch_audio(&json!({"type":"captureCompleted","requestId":"restart-voice"}).to_string(), vec![0.001; 1600]).unwrap()).unwrap();
+        let operation = effect(&captured, "sttInvoke")["operationId"].as_u64().unwrap();
+        let empty = dispatch(&mut core, json!({"type":"sttCompleted","operationId":operation,"text":"  ","elapsedMs":5}));
+        assert_eq!(effect(&empty, "captureStart")["restartOnSilence"], true);
+        assert!(effects(&empty).iter().any(|value| value["messageType"] == "voice.capture.state" && value["payload"]["state"] == "listening"));
+        assert!(!effects(&empty).iter().any(|value| value["messageType"] == "voice.capture.transcript" || value["messageType"] == "request.error"));
+        assert!(core.capture.as_ref().is_some_and(|capture| matches!(capture.phase, CapturePhase::Capturing) && capture.operation.is_none()));
+        assert!(core.accepted.contains("restart-voice"));
+    }
+
+    #[test]
+    fn legacy_voice_capture_still_reports_empty_speech() {
+        let mut core = ready_core();
+        let mut start = envelope("voice.capture.start", "legacy-empty"); start.as_object_mut().unwrap().extend(json!({"requestId":"legacy-empty","eventId":"e-legacy-empty","integrationId":"legacy","characterId":"operator","output":{"modalities":["text"],"language":"en"},"card":transfer()}).as_object().unwrap().clone());
+        socket(&mut core, start);
+        let mut stop = envelope("voice.capture.stop", "legacy-stop"); stop.as_object_mut().unwrap().insert("requestId".into(), json!("legacy-empty")); socket(&mut core, stop);
+        let captured = serde_json::from_str::<Value>(&core.dispatch_audio(&json!({"type":"captureCompleted","requestId":"legacy-empty"}).to_string(), vec![0.001; 1600]).unwrap()).unwrap();
+        let operation = effect(&captured, "sttInvoke")["operationId"].as_u64().unwrap();
+        let empty = dispatch(&mut core, json!({"type":"sttCompleted","operationId":operation,"text":"","elapsedMs":5}));
+        let error = effects(&empty).iter().find(|value| value["messageType"] == "request.error").expect("legacy empty-speech error");
+        assert_eq!(error["payload"]["code"], "empty_speech");
+        assert!(!effects(&empty).iter().any(|value| value["type"] == "captureStart"));
     }
 
     #[test]

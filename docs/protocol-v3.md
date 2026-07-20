@@ -47,7 +47,8 @@ Clones are scoped to `integrationId + characterId` within one connection session
     "audio": {
       "model": "gemtavern-supertonic-3",
       "voice": "F4",
-      "format": "pcm_s16le"
+      "format": "pcm_s16le",
+      "processing": { "profile": "narrowband_voice" }
     }
   },
   "player": { "displayName": "Player" },
@@ -56,6 +57,8 @@ Clones are scoped to `integrationId + characterId` within one connection session
 ```
 
 `output.modalities` always includes `text` and optionally includes `audio`. Audio requests must carry the Supertonic 3 model and voice descriptor; voice selection is therefore owned by the calling game rather than PWA settings. `output.language` is required. `player` is optional and defaults to `Player`. `event.text` becomes the newest user-role message. Requests are stateless and processed FIFO.
+
+`output.audio.processing` is optional. Omitting it preserves the natural Supertonic output. The game-neutral `narrowband_voice` profile band-limits, compresses, and mildly saturates speech for integrations such as phones, intercoms, and radios. Processing is applied before PCM transport, so WebSocket and filesystem integrations receive the same audio treatment when they request the profile.
 
 ## Responses
 
