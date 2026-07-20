@@ -287,7 +287,7 @@ pub(crate) fn validate_envelope_value(value: &Value) -> Result<(), String> {
             }
             validate_output(envelope.get("output"))?; validate_card_transfer(envelope.get("card"))?; validate_prompt_context(envelope)?;
         }
-        "voice.capture.start" => { for key in ["requestId", "eventId", "integrationId", "characterId"] { req_string(envelope, key)?; } if envelope.get("returnTranscript").is_some_and(|value| !value.is_boolean()) { return Err("returnTranscript must be a boolean.".into()); } validate_output(envelope.get("output"))?; validate_card_transfer(envelope.get("card"))?; validate_prompt_context(envelope)?; }
+        "voice.capture.start" => { for key in ["requestId", "eventId", "integrationId", "characterId"] { req_string(envelope, key)?; } if envelope.get("returnTranscript").is_some_and(|value| !value.is_boolean()) { return Err("returnTranscript must be a boolean.".into()); } if envelope.get("silenceBehavior").is_some_and(|value| !matches!(value.as_str(), Some("error" | "restart"))) { return Err("silenceBehavior must be \"error\" or \"restart\".".into()); } validate_output(envelope.get("output"))?; validate_card_transfer(envelope.get("card"))?; validate_prompt_context(envelope)?; }
         "voice.capture.stop" | "voice.capture.cancel" | "request.cancel" => req_string(envelope, "requestId")?,
         _ => {}
     }

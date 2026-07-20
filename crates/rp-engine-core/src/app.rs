@@ -8,7 +8,7 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use wasm_bindgen::prelude::*;
 
-const ABI_VERSION: u32 = 3;
+const ABI_VERSION: u32 = 4;
 const QUEUE_LIMIT: usize = 20;
 const GEMMA_ID: &str = "gemma-4-E2B-it-web-litertlm";
 const TTS_ID: &str = "gemtavern-supertonic-3";
@@ -155,7 +155,7 @@ enum CoreEffectV2 {
     RuntimesDispose,
     MicrophoneEnable,
     MicrophoneDisable,
-    CaptureStart { request_id: String },
+    CaptureStart { request_id: String, restart_on_silence: bool },
     CaptureStop { request_id: String },
     CaptureCancel { request_id: String },
     SttInvoke { operation_id: u64, buffer_id: u32, language: String },
@@ -641,7 +641,8 @@ impl CoreSession {
                 self.accepted.insert(request_id.clone());
                 self.capture = Some(CaptureRequest { envelope: envelope.clone(), card: resolved.get("card").cloned().unwrap_or(Value::Null), phase: CapturePhase::Capturing, operation: None });
                 self.send(effects, "reply.accepted", json!({ "requestId":request_id, "eventId":envelope.get("eventId"), "resolvedCardHash":resolved.get("hash"), "queueDepth":self.queue_depth() }));
-                effects.push(CoreEffectV2::CaptureStart { request_id }); self.publish_capacity(effects);
+                let restart_on_silence = envelope.get("silenceBehavior").and_then(Value::as_str) == Some("restart");
+                effects.push(CoreEffectV2::CaptureStart { request_id, restart_on_silence }); self.publish_capacity(effects);
             }
             Err(error) => self.request_error(Some(&request_id), &source, &error, effects),
         }
@@ -1037,9 +1038,9 @@ mod tests {
     fn socket(core: &mut CoreSession, envelope: Value) -> Value { dispatch(core, json!({"type":"transportMessage","raw":envelope.to_string()})) }
 
     #[test]
-    fn abi_v3_bootstraps_with_model_refresh_and_view() {
+    fn abi_v4_bootstraps_with_model_refresh_and_view() {
         let mut core = CoreSession::new(); let batch = dispatch(&mut core, json!({"type":"bootstrap","language":"ko","port":38471}));
-        assert_eq!(batch["abiVersion"], 3); assert!(batch["effects"].as_array().unwrap().iter().any(|effect| effect["type"] == "modelsRefresh")); assert_eq!(core.view_model_value()["settings"]["language"], "ko");
+        assert_eq!(batch["abiVersion"], 4); assert!(batch["effects"].as_array().unwrap().iter().any(|effect| effect["type"] == "modelsRefresh")); assert_eq!(core.view_model_value()["settings"]["language"], "ko");
     }
 
     #[test]
@@ -1199,7 +1200,7 @@ mod tests {
     fn voice_capture_flows_through_typed_audio_and_stt() {
         let mut core = ready_core();
         let mut start = envelope("voice.capture.start", "voice"); start.as_object_mut().unwrap().extend(json!({"requestId":"voice","eventId":"e-voice","integrationId":"mock-game","characterId":"rika","output":{"modalities":["text"],"language":"en"},"card":transfer(),"returnTranscript":true,"debug":{"echoCapturedAudio":true}}).as_object().unwrap().clone());
-        let accepted = socket(&mut core, start); assert_eq!(effect(&accepted, "captureStart")["requestId"], "voice");
+        let accepted = socket(&mut core, start); assert_eq!(effect(&accepted, "captureStart")["requestId"], "voice"); assert_eq!(effect(&accepted, "captureStart")["restartOnSilence"], false, "legacy clients must retain the error behavior");
         let mut stop = envelope("voice.capture.stop", "stop"); stop.as_object_mut().unwrap().insert("requestId".into(), json!("voice")); let stopping = socket(&mut core, stop); assert_eq!(effect(&stopping, "captureStop")["requestId"], "voice");
         let captured = serde_json::from_str::<Value>(&core.dispatch_audio(&json!({"type":"captureCompleted","requestId":"voice"}).to_string(), vec![0.2; 1600]).unwrap()).unwrap();
         for message in ["voice.capture.audio.start", "voice.capture.audio.chunk", "voice.capture.audio.completed"] { assert!(effects(&captured).iter().any(|value| value["messageType"] == message), "missing {message}: {captured}"); }
@@ -1210,6 +1211,13 @@ mod tests {
         assert_eq!(transcript["payload"]["text"], "Hello");
         assert_eq!(transcript["payload"]["language"], "en");
         assert!(effects(&transcribed).iter().any(|value| value["type"] == "gemmaInvoke"));
+    }
+
+    #[test]
+    fn voice_capture_can_opt_into_silent_window_restarts() {
+        let mut core = ready_core();
+        let mut start = envelope("voice.capture.start", "restart-voice"); start.as_object_mut().unwrap().extend(json!({"requestId":"restart-voice","eventId":"e-restart-voice","integrationId":"unknown-radio","characterId":"operator","output":{"modalities":["text"],"language":"en"},"card":transfer(),"silenceBehavior":"restart"}).as_object().unwrap().clone());
+        let accepted = socket(&mut core, start); assert_eq!(effect(&accepted, "captureStart")["restartOnSilence"], true);
     }
 
     #[test]

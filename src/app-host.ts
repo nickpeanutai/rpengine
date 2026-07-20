@@ -1,6 +1,6 @@
 import { CoreSession } from './core';
 import { APP_VERSION } from './app-version';
-import { dispatchCore, dispatchCoreAudio, takeCoreReplyAudioSegment, type CoreEffectV3, type HostAudioEventV3, type HostEventV3 } from './core-contract';
+import { dispatchCore, dispatchCoreAudio, takeCoreReplyAudioSegment, type CoreEffectV4, type HostAudioEventV4, type HostEventV4 } from './core-contract';
 import { BrowserVoiceCapture } from './browser-voice-capture';
 import { DiagnosticLog } from './diagnostics';
 import { EngineOwnership, type EngineOwnerPhase } from './engine-ownership';
@@ -15,7 +15,7 @@ import { getTransportHandle, putTransportHandle } from './history';
 import type { TransportAdapter, TransportEvents, TransportKind } from './transport-adapter';
 import { GEMMA_MODEL_ID, MOONSHINE_MODEL_IDS, SUPERTONIC_MODEL_ID, type MoonshineLanguage } from './types';
 
-type QueuedEvent = { event: HostEventV3 } | { event: HostAudioEventV3; samples: Float32Array };
+type QueuedEvent = { event: HostEventV4 } | { event: HostAudioEventV4; samples: Float32Array };
 
 export class AppHost {
   private readonly core = new CoreSession();
@@ -57,8 +57,8 @@ export class AppHost {
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(error => this.diagnostics.add('error', 'system', 'Service worker registration failed', details(error)));
   }
 
-  private dispatch(event: HostEventV3) { this.queue.push({ event }); this.drain(); }
-  private dispatchAudio(event: HostAudioEventV3, samples: Float32Array) { this.queue.push({ event, samples }); this.drain(); }
+  private dispatch(event: HostEventV4) { this.queue.push({ event }); this.drain(); }
+  private dispatchAudio(event: HostAudioEventV4, samples: Float32Array) { this.queue.push({ event, samples }); this.drain(); }
   private drain() {
     if (this.draining) return; this.draining = true;
     try {
@@ -70,7 +70,7 @@ export class AppHost {
     } finally { this.draining = false; }
   }
 
-  private execute(effect: CoreEffectV3) {
+  private execute(effect: CoreEffectV4) {
     switch (effect.type) {
       case 'transportConnect': void this.transport.connect(effect.port); break;
       case 'transportDisconnect': this.transport.disconnect(effect.reason, false); break;
@@ -96,7 +96,7 @@ export class AppHost {
       case 'runtimesDispose': this.runtime.dispose(); break;
       case 'microphoneEnable': void this.capture.enable().then(() => this.dispatch({ type: 'microphoneEnabled' })).catch(error => this.dispatch({ type: 'microphoneFailed', message: message(error) })); break;
       case 'microphoneDisable': this.capture.dispose(); this.dispatch({ type: 'microphoneDisabled' }); break;
-      case 'captureStart': this.startCapture(effect.requestId); break;
+      case 'captureStart': this.startCapture(effect.requestId, effect.restartOnSilence); break;
       case 'captureStop': void this.capture.stop(effect.requestId).then(result => this.dispatchAudio({ type: 'captureCompleted', requestId: effect.requestId }, result.samples)).catch(error => this.dispatch({ type: 'captureFailed', requestId: effect.requestId, message: message(error) })); break;
       case 'captureCancel': this.capture.cancel(effect.requestId); break;
       case 'sttInvoke': {
@@ -118,13 +118,13 @@ export class AppHost {
     }
   }
 
-  private startCapture(requestId: string) {
+  private startCapture(requestId: string, restartOnSilence: boolean) {
     try {
       this.capture.start(requestId, {
         onLevel: level => this.dispatch({ type: 'captureLevel', ...level }),
         onState: state => this.dispatch({ type: 'captureState', ...state }),
         onError: error => this.dispatch({ type: 'captureFailed', requestId, message: error.message }),
-      });
+      }, restartOnSilence ? 'restart' : 'error');
     } catch (error) { this.dispatch({ type: 'captureFailed', requestId, message: message(error) }); }
   }
 

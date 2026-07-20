@@ -34,6 +34,8 @@ export interface CaptureCallbacks {
   onError: (error: Error) => void;
 }
 
+export type SilenceBehavior = 'error' | 'restart';
+
 interface ActiveCapture {
   requestId: string;
   recorder: MediaRecorder;
@@ -48,6 +50,9 @@ interface ActiveCapture {
   limitTimer?: number;
   heldAtLimit: boolean;
   cancelled: boolean;
+  stopping: boolean;
+  silenceBehavior: SilenceBehavior;
+  restart?: Promise<void>;
 }
 
 export interface VoiceCaptureDiagnostic {
@@ -104,7 +109,7 @@ export class BrowserVoiceCapture {
     }
   }
 
-  start(requestId: string, callbacks: CaptureCallbacks) {
+  start(requestId: string, callbacks: CaptureCallbacks, silenceBehavior: SilenceBehavior = 'error') {
     if (!this.enabled || !this.stream || !this.context) throw new Error('Enable microphone in GameLink before starting a voice message.');
     if (this.active) throw new Error('A voice capture is already active.');
     const mimeType = preferredRecorderMimeType();
@@ -118,6 +123,8 @@ export class BrowserVoiceCapture {
       callbacks,
       heldAtLimit: false,
       cancelled: false,
+      stopping: false,
+      silenceBehavior,
     };
     recorder.ondataavailable = event => {
       if (event.data.size && !capture.cancelled) {
@@ -143,6 +150,7 @@ export class BrowserVoiceCapture {
   stop(requestId: string) {
     const capture = this.active;
     if (!capture || capture.requestId !== requestId) return Promise.reject(new Error('No matching voice capture is active.'));
+    capture.stopping = true;
     if (!capture.finalize) capture.finalize = this.finalize(capture);
     return capture.finalize;
   }
@@ -151,6 +159,7 @@ export class BrowserVoiceCapture {
     const capture = this.active;
     if (!capture || capture.requestId !== requestId) return;
     capture.cancelled = true;
+    capture.stopping = true;
     if (capture.limitTimer !== undefined) window.clearTimeout(capture.limitTimer);
     this.worklet?.port.postMessage({ type: 'cancel', requestId });
     this.vadWorker?.postMessage({ type: 'cancel', requestId });
@@ -231,7 +240,19 @@ export class BrowserVoiceCapture {
       });
       if (message.type === 'degraded') this.vadReady = false;
     } else if (message.type === 'no-speech') {
-      capture.callbacks.onError(new Error('No speech was detected within 8 seconds.'));
+      if (capture.silenceBehavior === 'restart') {
+        if (!capture.restart) {
+          capture.restart = this.restartSilentCapture(capture)
+            .catch(error => {
+              if (!capture.cancelled && !capture.stopping) this.captureFailed(error instanceof Error ? error : new Error(String(error)));
+            })
+            .finally(() => {
+              if (this.active === capture) capture.restart = undefined;
+            });
+        }
+      } else {
+        capture.callbacks.onError(new Error('No speech was detected within 8 seconds.'));
+      }
     } else if (message.type === 'diagnostic') {
       this.report('debug', `FireRedVAD p=${numberValue(message.probability).toFixed(3)}, inference=${numberValue(message.inferenceMs).toFixed(1)}ms, lag=${numberValue(message.lagSeconds).toFixed(2)}s.`);
     }
@@ -239,6 +260,7 @@ export class BrowserVoiceCapture {
 
   private async finalize(capture: ActiveCapture) {
     if (capture.limitTimer !== undefined) window.clearTimeout(capture.limitTimer);
+    if (capture.restart) await capture.restart;
     this.worklet?.port.postMessage({ type: 'stop', requestId: capture.requestId });
     this.vadWorker?.postMessage({ type: 'cancel', requestId: capture.requestId });
     const wallSeconds = Math.min(MAX_CAPTURE_SECONDS, (performance.now() - capture.startedAt) / 1000);
@@ -259,6 +281,40 @@ export class BrowserVoiceCapture {
     if (!samples.length) throw new Error('No microphone audio was captured.');
     if (stats.peak < SILENCE_PEAK_THRESHOLD && stats.rms < SILENCE_RMS_THRESHOLD) throw new Error('No audible microphone input was detected.');
     return { samples, seconds: pcmSeconds, ...stats };
+  }
+
+  private async restartSilentCapture(capture: ActiveCapture) {
+    if (this.active !== capture || capture.cancelled || capture.stopping) return;
+    if (capture.limitTimer !== undefined) window.clearTimeout(capture.limitTimer);
+    this.worklet?.port.postMessage({ type: 'cancel', requestId: capture.requestId });
+    this.vadWorker?.postMessage({ type: 'cancel', requestId: capture.requestId });
+    await this.stopRecorder(capture);
+    if (this.active !== capture || capture.cancelled || capture.stopping) return;
+
+    const mimeType = preferredRecorderMimeType();
+    const recorder = new MediaRecorder(this.stream!, mimeType ? { mimeType } : undefined);
+    capture.recorder = recorder;
+    capture.chunks = [];
+    capture.chunkTimes = [];
+    capture.startedAt = performance.now();
+    capture.recorderStop = undefined;
+    capture.resolveRecorderStop = undefined;
+    capture.rejectRecorderStop = undefined;
+    capture.heldAtLimit = false;
+    recorder.ondataavailable = event => {
+      if (event.data.size && !capture.cancelled) {
+        capture.chunks.push(event.data);
+        capture.chunkTimes.push(performance.now());
+      }
+    };
+    recorder.onerror = () => this.captureFailed(new Error('The browser microphone recorder failed.'));
+    recorder.onstop = () => capture.resolveRecorderStop?.(new Blob(capture.chunks, { type: recorder.mimeType || mimeType }));
+    recorder.start(RECORDER_TIMESLICE_MS);
+    this.worklet!.port.postMessage({ type: 'start', requestId: capture.requestId });
+    this.vadWorker!.postMessage({ type: 'start', requestId: capture.requestId, sourceRate: this.context!.sampleRate });
+    capture.limitTimer = window.setTimeout(() => this.holdAtLimit(capture), MAX_CAPTURE_SECONDS * 1000);
+    capture.callbacks.onState({ requestId: capture.requestId, state: 'listening', seconds: 0, autoEndEnabled: true, message: 'Still listening.' });
+    this.report('info', 'Silent voice capture window discarded and restarted.', { requestId: capture.requestId });
   }
 
   private stopRecorder(capture: ActiveCapture) {

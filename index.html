@@ -226,6 +226,7 @@
           <p>Use <code>voice.capture.start</code> when the player should speak through the microphone attached to the RPEngine browser. It uses the same <code>requestId</code>, <code>eventId</code>, <code>integrationId</code>, <code>characterId</code>, <code>output</code>, <code>player</code>, card transfer, and optional prompt fields as <code>reply.request</code>, but it does not include <code>event</code>.</p>
           <p>The player must enable microphone access in RPEngine first. RPEngine reports <code>voice.capture.level</code> and <code>voice.capture.state</code>. FireRedVAD normally ends speech automatically; the game may send <code>voice.capture.stop</code> to finish manually or <code>voice.capture.cancel</code> to discard the capture. Successful speech then follows the normal reply stream.</p>
           <p>Set <code>returnTranscript: true</code> to receive one local <code>voice.capture.transcript</code> envelope. It is omitted unless explicitly requested.</p>
+          <p>By default, eight seconds without detected speech ends the request with the existing no-speech error. A turn-based integration may set <code>silenceBehavior: "restart"</code> to discard each silent capture window and continue listening under the same request. Manual stop/cancel behavior is unchanged.</p>
         </section>
 
         <section>

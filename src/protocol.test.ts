@@ -36,6 +36,12 @@ describe('RPEngine protocol v3', () => {
     expect(decodeEnvelope(JSON.stringify(start)).type).toBe('voice.capture.start');
     expect(decodeEnvelope(JSON.stringify({ protocol: 'gemtavern.rp_engine', protocolVersion: 3, type: 'voice.capture.stop', messageId: 'm2', timestamp: '2026-07-14T00:00:00.000Z', requestId: 'r1' })).type).toBe('voice.capture.stop');
   });
+  it('accepts only supported voice silence behaviors', () => {
+    const start = { ...base, ...promptContext, protocol: 'gemtavern.rp_engine', type: 'voice.capture.start', silenceBehavior: 'restart' };
+    delete (start as { event?: unknown }).event;
+    expect((decodeEnvelope(JSON.stringify(start)) as { silenceBehavior?: string }).silenceBehavior).toBe('restart');
+    expect(() => decodeEnvelope(JSON.stringify({ ...start, silenceBehavior: 'ignore' }))).toThrow(/silenceBehavior/);
+  });
   it('accepts complete prompt context and rejects incomplete or invalid bundles', () => {
     expect(decodeEnvelope(JSON.stringify({ ...base, ...promptContext })).type).toBe('reply.request');
     expect(() => decodeEnvelope(JSON.stringify({ ...base, interactionMode: 'auto_event' }))).toThrow(/together/);

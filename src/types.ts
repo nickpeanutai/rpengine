@@ -139,6 +139,7 @@ export interface VoiceCaptureStartEnvelope extends EnvelopeBase {
   promptScene?: PromptScene;
   promptDirective?: PromptDirective;
   returnTranscript?: boolean;
+  silenceBehavior?: 'error' | 'restart';
 }
 
 export interface VoiceCaptureStopEnvelope extends EnvelopeBase {

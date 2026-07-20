@@ -1,10 +1,10 @@
-import type { AppViewModelV3 } from './core-contract';
+import type { AppViewModelV4 } from './core-contract';
 import { DiagnosticLog } from './diagnostics';
 
 const $ = <T extends HTMLElement>(selector: string) => { const element = document.querySelector<T>(selector); if (!element) throw new Error(`Missing element: ${selector}`); return element; };
 
 export class AppRenderer {
-  render(view: AppViewModelV3) {
+  render(view: AppViewModelV4) {
     const connection = $('#connectionStatus'); connection.textContent = view.connection.label; connection.className = `status launch-status ${view.connection.connected ? 'success' : ''}`;
     const primary = $('#primaryButton') as HTMLButtonElement; primary.disabled = view.primary.disabled; primary.classList.toggle('is-indeterminate', view.primary.indeterminate);
     $('#primaryButtonLabel').textContent = view.primary.label; $('#primaryButtonDetail').textContent = view.primary.detail;
