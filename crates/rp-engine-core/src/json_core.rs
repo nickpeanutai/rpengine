@@ -1,4 +1,4 @@
-use crate::js_error;
+use crate::{js_error, parse_response_processing};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -250,6 +250,7 @@ fn validate_output(value: Option<&Value>) -> Result<(), String> {
         }
     } else if output.contains_key("audio") { return Err("output.audio requires the audio modality.".into()); }
     if output.get("language").and_then(Value::as_str).unwrap_or_default().trim().is_empty() { return Err("reply.request output.language is required.".into()); }
+    parse_response_processing(output.get("responseProcessing"))?;
     Ok(())
 }
 

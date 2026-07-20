@@ -20,6 +20,20 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
+export interface ResponseProcessingRule {
+  id: string;
+  matcher: { type: 'regex'; pattern: string; flags?: string };
+  captureGroup: number;
+  occurrence: 'first' | 'last' | 'all';
+  remove: 'match' | 'capture' | 'none';
+  removeFrom: Array<'text' | 'audio'>;
+}
+
+export interface ResponseProcessing {
+  mode: 'buffered';
+  rules: ResponseProcessingRule[];
+}
+
 export type CharacterCardV2Data = JsonObject & {
   name: string;
   description: string;
@@ -95,6 +109,7 @@ export interface ReplyRequestEnvelope extends EnvelopeBase {
   output: {
     modalities: Array<'text' | 'audio'>;
     language: string;
+    responseProcessing?: ResponseProcessing;
     audio?: {
       model: typeof SUPERTONIC_MODEL_ID;
       voice: string;

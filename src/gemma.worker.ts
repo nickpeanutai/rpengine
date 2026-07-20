@@ -10,6 +10,7 @@ let engine: Engine | undefined;
 let conversation: Conversation | undefined;
 let runtimeLoaded = false;
 let policy: GemmaWorkerCore;
+let loadedModelId: string | undefined;
 
 self.onmessage = event => {
   const request = event.data as WorkerRequestV2;
@@ -41,6 +42,7 @@ async function load(operationId: number) {
     runtimeLoaded = true;
   }
   if (engine) await engine.delete();
+  engine = undefined; loadedModelId = undefined;
   const model = await getInstalledModelFile(plan.modelId, plan.path);
   const settings: EngineSettings = {
     model: model.stream(), backend: Backend.GPU_ARTISAN,
@@ -50,13 +52,15 @@ async function load(operationId: number) {
     },
   };
   engine = await Engine.create(settings);
+  loadedModelId = plan.modelId;
   policy.mark_loaded();
   self.postMessage({ type: 'loaded', operationId });
 }
 
 async function generate(request: Extract<WorkerRequestV2, { type: 'generate' }>) {
-  if (!engine) throw new Error('Gemma is not loaded.');
+  if (!engine || !loadedModelId) throw new Error('Gemma is not loaded.');
   const plan = JSON.parse(policy.generation_plan(BigInt(request.operationId))) as { maxOutputTokens: number; temperature: number; k: number };
+  self.postMessage({ type: 'generationStarted', operationId: request.operationId, generation: { model: loadedModelId, maxOutputTokens: plan.maxOutputTokens, sampler: 'top_k', temperature: plan.temperature, topK: plan.k } });
   const started = performance.now();
   conversation = await engine.createConversation({
     sessionConfig: { maxOutputTokens: plan.maxOutputTokens, samplerParams: { type: SamplerType.TOP_K, temperature: plan.temperature, k: plan.k } },

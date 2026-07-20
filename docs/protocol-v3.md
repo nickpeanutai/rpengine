@@ -13,7 +13,7 @@ Every message uses this envelope:
 }
 ```
 
-The local adapter is the loopback WebSocket host. The port is configurable and defaults to `38471`; both sides must use the same value. The compute client sends `hello` and the adapter returns `welcome` with a new `sessionId`. Both sides acknowledge received envelopes and reject wrong versions, duplicate message IDs, invalid sessions, and messages over 8 MiB. The adapter must bind only to `127.0.0.1` and validate the RPEngine web origin.
+The selected local transport carries these envelopes. WebSocket mode connects to a configurable loopback port (default `38471`) and must bind only to `127.0.0.1` while validating the RPEngine web origin. Filesystem mode uses the selected integration-owned mailbox described below. In both modes RPEngine sends `hello`, the integration returns `welcome` with a new `sessionId`, both sides acknowledge received envelopes, and invalid versions, duplicate message IDs, invalid sessions, and messages over 8 MiB are rejected.
 
 ## Character transfer
 
@@ -44,6 +44,19 @@ Clones are scoped to `integrationId + characterId` within one connection session
   "output": {
     "modalities": ["text", "audio"],
     "language": "en",
+    "responseProcessing": {
+      "mode": "buffered",
+      "rules": [
+        {
+          "id": "emotion",
+          "matcher": { "type": "regex", "pattern": "<([a-z][a-z0-9_]{0,63})>\\s*$" },
+          "captureGroup": 1,
+          "occurrence": "last",
+          "remove": "match",
+          "removeFrom": ["text", "audio"]
+        }
+      ]
+    },
     "audio": {
       "model": "gemtavern-supertonic-3",
       "voice": "F4",
@@ -56,7 +69,9 @@ Clones are scoped to `integrationId + characterId` within one connection session
 }
 ```
 
-`output.modalities` always includes `text` and optionally includes `audio`. Audio requests must carry the Supertonic 3 model and voice descriptor; voice selection is therefore owned by the calling game rather than PWA settings. `output.language` is required. `player` is optional and defaults to `Player`. `event.text` becomes the newest user-role message. Requests are stateless and processed FIFO.
+`output.modalities` always includes `text` and optionally includes `audio`. Audio requests must carry the Supertonic 3 model and voice descriptor; voice selection is therefore owned by the calling game rather than PWA settings. `output.language` is required. `output.responseProcessing` is optional. When present, its buffered regular-expression rules run against the complete raw model response before any text or audio is delivered. Each rule captures content under its caller-defined `id` and can remove either the whole match or the capture group from text, audio, both, or neither. Captures are returned as arrays in `extractedContent` on `reply.text.completed`. RPEngine does not add output-format instructions or interpret extracted values; integrations own prompting and semantic validation. Buffered processing intentionally delays text and TTS until generation completes so filtered content cannot leak through streaming output. `player` is optional and defaults to `Player`. `event.text` becomes the newest user-role message. Requests are stateless and processed FIFO.
+
+Response-processing rules use Rust regular-expression syntax. A rule supplies `captureGroup`, selects `first`, `last`, or `all` occurrences, and chooses `match`, `capture`, or `none` removal. Rule identifiers must match `^[a-z][a-z0-9_.-]{0,63}$`. The Core accepts at most eight rules, 1,024 bytes per pattern, sixteen capture groups, and sixty-four matches per rule. Supported flags are `i`, `m`, and `s`. Invalid configurations are rejected before Gemma is invoked; a valid rule that finds no match returns an empty array and does not fail the reply.
 
 `output.audio.processing` is optional. Omitting it preserves the natural Supertonic output. Supported game-neutral profiles are:
 
@@ -67,11 +82,11 @@ Processing is applied before PCM transport, so WebSocket and filesystem integrat
 
 ## Responses
 
-After `reply.accepted`, text and audio are concurrent streams. `reply.audio.start` and complete sentence segments may arrive before `reply.text.completed`. Preserve the sequence within each stream; `reply.completed` is sent only after every requested modality has completed.
+After `reply.accepted`, requests without response processing use concurrent text and audio streams. `reply.audio.start` and complete sentence segments may arrive before `reply.text.completed`. Buffered response processing suppresses text deltas and begins TTS only after the complete response has been filtered. Preserve the sequence within each stream; `reply.completed` is sent only after every requested modality has completed.
 
 - `reply.accepted`: request accepted and card hash resolved.
-- `reply.text.delta`: clean display-text chunk with a zero-based sequence.
-- `reply.text.completed`: complete clean display text.
+- `reply.text.delta`: clean display-text chunk with a zero-based sequence; omitted for buffered response processing.
+- `reply.text.completed`: complete clean display text and, when response processing was requested, an `extractedContent` object whose keys are rule IDs and whose values are capture arrays.
 - `reply.audio.start`: `pcm_s16le`, sample rate, and mono channel count. Final totals are not known yet because synthesis begins while text is still being generated.
 - `reply.audio.chunk`: zero-based global sequence, sentence-level `segmentSequence`, `segmentChunkSequence`, `segmentChunkCount`, and base64 PCM bytes. A game may play each complete segment immediately while later segments are generated.
 - `reply.audio.completed`: final segment, chunk, byte, duration, and synthesis-time totals.

@@ -1,7 +1,8 @@
 use crate::{
     assemble_prompt_value, base64_bytes, decode_audio_input_inner, display_text_inner, float32_to_pcm16,
-    js_error, parse_json, process_output_audio, synthesis_text_inner, validate_envelope_value, AudioProcessingProfile,
-    CardSessionCore, DisplayTextStreamCore, SpeechChunkerCore,
+    js_error, parse_json, parse_response_processing, process_output_audio, synthesis_text_inner,
+    validate_envelope_value, AudioProcessingProfile,
+    CardSessionCore, DisplayTextStreamCore, ResponseProcessing, SpeechChunkerCore,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -114,6 +115,7 @@ struct ActiveReply {
     gemma_done: bool,
     text_completed: bool,
     speech: Option<SpeechState>,
+    response_processing: Option<ResponseProcessing>,
 }
 
 #[derive(Clone, Copy)]
@@ -161,6 +163,16 @@ enum CoreEffectV2 {
     CaptureStop { request_id: String },
     CaptureCancel { request_id: String },
     SttInvoke { operation_id: u64, buffer_id: u32, language: String },
+    PromptSnapshotStarted { operation_id: u64, snapshot: Value },
+    PromptSnapshotGeneration { operation_id: u64, generation: Value },
+    PromptSnapshotFinished {
+        operation_id: u64,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     GemmaInvoke { operation_id: u64, system: String, user: String, history: Value },
     GemmaCancel { operation_id: u64 },
     TtsInvoke { operation_id: u64, text: String, language: String, voice: String, segment_sequence: u32 },
@@ -210,6 +222,9 @@ pub struct CoreSession {
     session_id: Option<String>,
     reconnect_attempt: u32,
     transport_attempt: u32,
+    prompt_capture_enabled: bool,
+    prompt_capture_integration_id: String,
+    prompt_capture_operations: HashSet<u64>,
 }
 
 #[wasm_bindgen]
@@ -224,6 +239,7 @@ impl CoreSession {
             owner_elsewhere_phase: None, release_after_action: false, pending_downloads: VecDeque::new(), active_download: None, manual_model_action: None,
             microphone_enabled: false, microphone_pending: false, microphone_error: String::new(), connection_state: "idle".into(), session_id: None,
             reconnect_attempt: 0, transport_attempt: 0,
+            prompt_capture_enabled: false, prompt_capture_integration_id: String::new(), prompt_capture_operations: HashSet::new(),
         }
     }
 
@@ -293,12 +309,19 @@ impl CoreSession {
                 if let Some(version) = object.get("appVersion").and_then(Value::as_str).filter(|value| !value.is_empty()) { self.app_version = version.into(); }
                 if let Some(language) = object.get("language").and_then(Value::as_str).filter(|value| supported_stt_language(value)) { self.selected_language = language.into(); }
                 if let Some(port) = object.get("port").and_then(Value::as_u64).filter(|value| (1024..=65535).contains(value)) { self.port = port as u16; }
+                self.prompt_capture_enabled = object.get("promptCaptureEnabled").and_then(Value::as_bool).unwrap_or(false);
+                self.prompt_capture_integration_id = object.get("promptCaptureIntegrationId").and_then(Value::as_str).unwrap_or_default().trim().to_string();
                 effects.push(CoreEffectV2::ModelsRefresh);
             }
             "uiPrimary" => self.primary(effects),
             "uiToggleMicrophone" => self.toggle_microphone(effects),
             "uiLanguage" => self.change_language(object.get("language").and_then(Value::as_str).unwrap_or_default(), effects),
             "uiPort" => self.change_port(object.get("port").and_then(Value::as_u64).unwrap_or(0), effects),
+            "uiPromptCaptureSettings" => {
+                self.prompt_capture_enabled = object.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+                self.prompt_capture_integration_id = object.get("integrationId").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+                self.prompt_capture_operations.clear();
+            }
             "uiModelAction" => self.model_action(object, effects),
             "pageHide" => self.stop_service(effects, true),
             "ownershipAcquired" => self.ownership_acquired(effects),
@@ -330,6 +353,7 @@ impl CoreSession {
             "sttCompleted" => self.stt_completed(object, effects),
             "sttFailed" => self.operation_failed(object, "Moonshine", effects),
             "gemmaDelta" => self.gemma_delta(object, effects),
+            "gemmaStarted" => self.gemma_started(object, effects),
             "gemmaCompleted" => self.gemma_completed(object, effects),
             "gemmaFailed" => self.operation_failed(object, "Gemma", effects),
             "ttsFailed" => self.operation_failed(object, "Supertonic", effects),
@@ -672,11 +696,15 @@ impl CoreSession {
         let language = envelope.pointer("/output/language").and_then(Value::as_str).unwrap_or("en").to_string();
         let voice = envelope.pointer("/output/audio/voice").and_then(Value::as_str).unwrap_or("F4").to_string();
         let processing = envelope.pointer("/output/audio/processing/profile").and_then(Value::as_str).and_then(AudioProcessingProfile::from_name);
+        let response_processing = match parse_response_processing(envelope.pointer("/output/responseProcessing")) {
+            Ok(value) => value,
+            Err(error) => { self.request_error_code(Some(&request_id), &source_message_id, "invalid_request", error, effects); self.start_next_reply(effects); return; }
+        };
         let wants_audio = envelope.pointer("/output/modalities").and_then(Value::as_array).is_some_and(|values| values.iter().any(|value| value.as_str() == Some("audio")));
         if !supported_tts_language(&language) { self.request_error_code(Some(&request_id), &source_message_id, "unsupported_language", format!("Unsupported language: {language}"), effects); self.start_next_reply(effects); return; }
         if !supported_voice(&voice) { self.request_error_code(Some(&request_id), &source_message_id, "unsupported_voice", format!("Unsupported voice: {voice}"), effects); self.start_next_reply(effects); return; }
         let speech = wants_audio.then(|| SpeechState { language, voice, processing, expression_tags: self.expression_tags.clone(), chunker: SpeechChunkerCore::new(1), pending: VecDeque::new(), inflight: None, started: false, audio_sequence: 0, segment_count: 0, total_chunks: 0, total_bytes: 0, duration_seconds: 0.0, elapsed_ms: 0.0 });
-        self.active = Some(ActiveReply { request_id: request_id.clone(), source_message_id, envelope, card: queued.card, raw: String::new(), clean: String::new(), delta_sequence: 0, display: DisplayTextStreamCore::new(), transcript: None, stt_operation: None, gemma_operation: None, gemma_done: false, text_completed: false, speech });
+        self.active = Some(ActiveReply { request_id: request_id.clone(), source_message_id, envelope, card: queued.card, raw: String::new(), clean: String::new(), delta_sequence: 0, display: DisplayTextStreamCore::new(), transcript: None, stt_operation: None, gemma_operation: None, gemma_done: false, text_completed: false, speech, response_processing });
         let audio = self.active.as_ref().and_then(|active| active.envelope.pointer("/event/audio")).cloned();
         if let Some(audio) = audio {
             let language = audio.get("language").and_then(Value::as_str).unwrap_or(&self.selected_language).to_string();
@@ -712,6 +740,33 @@ impl CoreSession {
         match assemble_prompt_value(&request) {
             Ok(prompt) => {
                 let operation = self.next_operation(); active.gemma_operation = Some(operation);
+                let integration_id = active.envelope.get("integrationId").and_then(Value::as_str).unwrap_or_default();
+                if self.prompt_capture_enabled && (self.prompt_capture_integration_id.is_empty() || self.prompt_capture_integration_id == integration_id) {
+                    let audio = active.envelope.pointer("/event/audio").and_then(Value::as_object).map(|value| json!({
+                        "format":value.get("format"), "sampleRate":value.get("sampleRate"), "channels":value.get("channels"), "language":value.get("language")
+                    }));
+                    let snapshot = json!({
+                        "requestId":active.request_id,
+                        "integrationId":integration_id,
+                        "characterId":active.envelope.get("characterId"),
+                        "received":{
+                            "eventText":active.envelope.pointer("/event/text"),
+                            "transcript":active.transcript,
+                            "effectiveEventText":event_text,
+                            "audio":audio,
+                            "cardTransfer":active.envelope.get("card"),
+                            "resolvedCard":active.card,
+                            "interactionMode":active.envelope.get("interactionMode"),
+                            "promptScene":active.envelope.get("promptScene"),
+                            "promptDirective":active.envelope.get("promptDirective"),
+                            "output":active.envelope.get("output"),
+                            "player":active.envelope.get("player")
+                        },
+                        "assembled":prompt
+                    });
+                    self.prompt_capture_operations.insert(operation);
+                    effects.push(CoreEffectV2::PromptSnapshotStarted { operation_id: operation, snapshot });
+                }
                 effects.push(CoreEffectV2::GemmaInvoke { operation_id: operation, system: prompt.get("system").and_then(Value::as_str).unwrap_or_default().into(), user: prompt.get("user").and_then(Value::as_str).unwrap_or_default().into(), history: prompt.get("history").cloned().unwrap_or_else(|| json!([])) });
                 self.diagnostic(effects, "info", "gemma", "Text generation started", None);
                 self.active = Some(active);
@@ -756,24 +811,54 @@ impl CoreSession {
         let Some(mut active) = self.active.take() else { return; };
         if active.gemma_operation != Some(operation) { self.active = Some(active); return; }
         active.raw.push_str(&chunk);
-        let clean = active.display.push(&chunk);
-        if !clean.is_empty() { self.send(effects, "reply.text.delta", json!({ "requestId":active.request_id, "sequence":active.delta_sequence, "delta":clean })); active.delta_sequence += 1; active.clean.push_str(&clean); }
-        if let Some(speech) = active.speech.as_mut() { if let Err(error) = enqueue_chunks(speech, &active.raw, false) { self.active = Some(active); self.fail_active("request_failed", error, effects); return; } }
+        if active.response_processing.is_none() {
+            let clean = active.display.push(&chunk);
+            if !clean.is_empty() { self.send(effects, "reply.text.delta", json!({ "requestId":active.request_id, "sequence":active.delta_sequence, "delta":clean })); active.delta_sequence += 1; active.clean.push_str(&clean); }
+            if let Some(speech) = active.speech.as_mut() { if let Err(error) = enqueue_chunks(speech, &active.raw, false) { self.active = Some(active); self.fail_active("request_failed", error, effects); return; } }
+        }
         self.active = Some(active); self.start_tts_if_needed(effects);
+    }
+
+    fn gemma_started(&self, object: &Map<String, Value>, effects: &mut Vec<CoreEffectV2>) {
+        let operation = object.get("operationId").and_then(Value::as_u64).unwrap_or(0);
+        if self.prompt_capture_operations.contains(&operation) {
+            effects.push(CoreEffectV2::PromptSnapshotGeneration { operation_id: operation, generation: object.get("generation").cloned().unwrap_or_else(|| json!({})) });
+        }
     }
 
     fn gemma_completed(&mut self, object: &Map<String, Value>, effects: &mut Vec<CoreEffectV2>) {
         let operation = object.get("operationId").and_then(Value::as_u64).unwrap_or(0);
         let Some(mut active) = self.active.take() else { return; };
         if active.gemma_operation != Some(operation) { self.active = Some(active); return; }
-        let tail = active.display.finish();
-        if !tail.is_empty() { self.send(effects, "reply.text.delta", json!({ "requestId":active.request_id, "sequence":active.delta_sequence, "delta":tail })); active.delta_sequence += 1; active.clean.push_str(&tail); }
+        if active.response_processing.is_none() {
+            let tail = active.display.finish();
+            if !tail.is_empty() { self.send(effects, "reply.text.delta", json!({ "requestId":active.request_id, "sequence":active.delta_sequence, "delta":tail })); active.delta_sequence += 1; active.clean.push_str(&tail); }
+        }
         let generated = object.get("response").and_then(Value::as_str).filter(|value| !value.is_empty()).unwrap_or(&active.raw).to_string();
-        if let Some(speech) = active.speech.as_mut() { if let Err(error) = enqueue_chunks(speech, &generated, true) { self.active = Some(active); self.fail_active("request_failed", error, effects); return; } }
-        let final_text = display_text_inner(&generated).trim().to_string();
+        let processed = active.response_processing.as_ref().map(|processing| processing.process(&generated));
+        let text_source = processed.as_ref().map(|value| value.text.as_str()).unwrap_or(&generated);
+        let audio_source = processed.as_ref().map(|value| value.audio.as_str()).unwrap_or(&generated);
+        if let Some(speech) = active.speech.as_mut() { if let Err(error) = enqueue_chunks(speech, audio_source, true) { self.active = Some(active); self.fail_active("request_failed", error, effects); return; } }
+        let final_text = display_text_inner(text_source).trim().to_string();
         if !final_text.is_empty() { active.clean = final_text; }
         active.gemma_done = true; active.text_completed = true;
-        self.send(effects, "reply.text.completed", json!({ "requestId":active.request_id, "text":active.clean, "tokenCount":object.get("tokenCount").and_then(Value::as_u64).unwrap_or(0), "elapsedMs":object.get("elapsedMs").and_then(Value::as_f64).unwrap_or(0.0) }));
+        let mut completed = json!({ "requestId":active.request_id, "text":active.clean, "tokenCount":object.get("tokenCount").and_then(Value::as_u64).unwrap_or(0), "elapsedMs":object.get("elapsedMs").and_then(Value::as_f64).unwrap_or(0.0) });
+        if let Some(processed) = &processed { completed.as_object_mut().unwrap().insert("extractedContent".into(), processed.extracted.clone()); }
+        if self.prompt_capture_operations.remove(&operation) {
+            let result = json!({
+                "rawResponse":generated,
+                "displayText":active.clean,
+                "tokenCount":object.get("tokenCount").and_then(Value::as_u64).unwrap_or(0),
+                "elapsedMs":object.get("elapsedMs").and_then(Value::as_f64).unwrap_or(0.0)
+            });
+            effects.push(CoreEffectV2::PromptSnapshotFinished {
+                operation_id: operation,
+                status: "completed".into(),
+                result: Some(result),
+                error: None,
+            });
+        }
+        self.send(effects, "reply.text.completed", completed);
         self.active = Some(active); self.start_tts_if_needed(effects); self.complete_if_ready(effects);
     }
 
@@ -917,7 +1002,10 @@ impl CoreSession {
             self.queue.remove(position); self.accepted.remove(request_id); self.send(effects, "reply.cancelled", json!({ "requestId":request_id, "reason":reason })); self.publish_capacity(effects); return;
         }
         if self.active.as_ref().is_some_and(|active| active.request_id == request_id) {
-            if let Some(operation) = self.active.as_ref().and_then(|active| active.gemma_operation) { effects.push(CoreEffectV2::GemmaCancel { operation_id: operation }); }
+            if let Some(operation) = self.active.as_ref().and_then(|active| active.gemma_operation) {
+                effects.push(CoreEffectV2::GemmaCancel { operation_id: operation });
+                if self.prompt_capture_operations.remove(&operation) { effects.push(CoreEffectV2::PromptSnapshotFinished { operation_id: operation, status: "cancelled".into(), result: None, error: None }); }
+            }
             self.stt_targets.retain(|_, target| !matches!(target, SttTarget::Reply(id) if id == request_id));
             self.active = None; self.accepted.remove(request_id); self.send(effects, "reply.cancelled", json!({ "requestId":request_id, "reason":reason })); self.publish_capacity(effects); self.start_next_reply(effects); return;
         }
@@ -926,7 +1014,10 @@ impl CoreSession {
 
     fn cancel_all(&mut self, effects: &mut Vec<CoreEffectV2>, reason: &str) {
         let ids = self.queue.iter().filter_map(|queued| queued.envelope.get("requestId").and_then(Value::as_str).map(str::to_string)).chain(self.active.as_ref().map(|active| active.request_id.clone())).chain(self.capture.as_ref().and_then(|capture| capture.envelope.get("requestId").and_then(Value::as_str).map(str::to_string))).collect::<Vec<_>>();
-        if let Some(operation) = self.active.as_ref().and_then(|active| active.gemma_operation) { effects.push(CoreEffectV2::GemmaCancel { operation_id: operation }); }
+        if let Some(operation) = self.active.as_ref().and_then(|active| active.gemma_operation) {
+            effects.push(CoreEffectV2::GemmaCancel { operation_id: operation });
+            if self.prompt_capture_operations.remove(&operation) { effects.push(CoreEffectV2::PromptSnapshotFinished { operation_id: operation, status: "cancelled".into(), result: None, error: Some(reason.into()) }); }
+        }
         if let Some(id) = self.capture.as_ref().and_then(|capture| capture.envelope.get("requestId")).and_then(Value::as_str) { effects.push(CoreEffectV2::CaptureCancel { request_id: id.into() }); }
         self.queue.clear(); self.active = None; self.capture = None; self.accepted.clear(); self.stt_targets.clear(); self.buffers.clear();
         for id in ids { self.send(effects, "reply.cancelled", json!({ "requestId":id, "reason":reason })); }
@@ -934,6 +1025,9 @@ impl CoreSession {
 
     fn fail_active(&mut self, code: &str, message: String, effects: &mut Vec<CoreEffectV2>) {
         let Some(active) = self.active.take() else { return; };
+        if let Some(operation) = active.gemma_operation.filter(|operation| self.prompt_capture_operations.remove(operation)) {
+            effects.push(CoreEffectV2::PromptSnapshotFinished { operation_id: operation, status: "failed".into(), result: None, error: Some(message.clone()) });
+        }
         self.accepted.remove(&active.request_id);
         self.request_error_code(Some(&active.request_id), &active.source_message_id, code, message, effects);
         self.publish_capacity(effects); self.start_next_reply(effects);
@@ -1134,6 +1228,142 @@ mod tests {
         dispatch(&mut core,json!({"type":"gemmaCompleted","operationId":operation,"response":"A private prior answer","tokenCount":4,"elapsedMs":1}));
         let second=socket(&mut core,reply("stateless-two",false,false)); let second_invoke=effect(&second,"gemmaInvoke");
         assert_eq!(first_invoke["history"],json!([])); assert_eq!(second_invoke["history"],json!([])); assert!(!second_invoke.to_string().contains("A private prior answer"));
+    }
+
+    #[test]
+    fn buffered_response_processing_extracts_content_and_filters_text_and_tts() {
+        let mut core = ready_core();
+        let mut request = reply("processed", false, true);
+        request.pointer_mut("/output").unwrap().as_object_mut().unwrap().insert("responseProcessing".into(), json!({"mode":"buffered","rules":[{"id":"emotion","matcher":{"type":"regex","pattern":"<([a-z][a-z0-9_]{0,63})>\\s*$"},"captureGroup":1,"occurrence":"last","remove":"match","removeFrom":["text","audio"]}]}));
+        let accepted = socket(&mut core, request);
+        let operation = effect(&accepted, "gemmaInvoke")["operationId"].as_u64().unwrap();
+        let delta = dispatch(&mut core, json!({"type":"gemmaDelta","operationId":operation,"chunk":"Keep moving.<fear_"}));
+        assert!(!effects(&delta).iter().any(|value| value["messageType"] == "reply.text.delta"));
+        assert!(!effects(&delta).iter().any(|value| value["type"] == "ttsInvoke"));
+        let completed = dispatch(&mut core, json!({"type":"gemmaCompleted","operationId":operation,"response":"Keep moving.<fear_anxious>","tokenCount":3,"elapsedMs":20}));
+        let text = effects(&completed).iter().find(|value| value["messageType"] == "reply.text.completed").unwrap();
+        assert_eq!(text["payload"]["text"], "Keep moving.");
+        assert_eq!(text["payload"]["extractedContent"]["emotion"], json!(["fear_anxious"]));
+        assert_eq!(effect(&completed, "ttsInvoke")["text"], "Keep moving.");
+    }
+
+    #[test]
+    fn extracted_content_is_absent_without_response_processing() {
+        let mut core = ready_core();
+        let accepted = socket(&mut core, reply("unprocessed", false, false));
+        let operation = effect(&accepted, "gemmaInvoke")["operationId"].as_u64().unwrap();
+        let completed = dispatch(&mut core, json!({"type":"gemmaCompleted","operationId":operation,"response":"Keep moving.<fear_anxious>","tokenCount":3,"elapsedMs":20}));
+        let text = effects(&completed).iter().find(|value| value["messageType"] == "reply.text.completed").unwrap();
+        assert_eq!(text["payload"]["text"], "Keep moving.");
+        assert!(text["payload"].get("extractedContent").is_none());
+    }
+
+    #[test]
+    fn prompt_capture_is_opt_in_filtered_and_precedes_gemma() {
+        let mut core = ready_core();
+        let disabled = socket(&mut core, reply("capture-off", false, false));
+        assert!(!effects(&disabled).iter().any(|value| value["type"] == "promptSnapshotStarted"));
+        let operation = effect(&disabled, "gemmaInvoke")["operationId"].as_u64().unwrap();
+        dispatch(&mut core, json!({"type":"gemmaCompleted","operationId":operation,"response":"Done","tokenCount":1,"elapsedMs":1}));
+
+        dispatch(&mut core, json!({"type":"uiPromptCaptureSettings","enabled":true,"integrationId":"zomboidcall"}));
+        let filtered = socket(&mut core, reply("capture-filtered", false, false));
+        assert!(!effects(&filtered).iter().any(|value| value["type"] == "promptSnapshotStarted"));
+        let operation = effect(&filtered, "gemmaInvoke")["operationId"].as_u64().unwrap();
+        dispatch(&mut core, json!({"type":"gemmaCompleted","operationId":operation,"response":"Done","tokenCount":1,"elapsedMs":1}));
+
+        dispatch(&mut core, json!({"type":"uiPromptCaptureSettings","enabled":true,"integrationId":"test"}));
+        let captured = socket(&mut core, reply("capture-on", false, false));
+        let kinds = effects(&captured).iter().map(|value| value["type"].as_str().unwrap_or_default()).collect::<Vec<_>>();
+        let capture_index = kinds.iter().position(|value| *value == "promptSnapshotStarted").unwrap();
+        let invoke_index = kinds.iter().position(|value| *value == "gemmaInvoke").unwrap();
+        assert!(capture_index < invoke_index);
+        let snapshot = &effect(&captured, "promptSnapshotStarted")["snapshot"];
+        assert_eq!(snapshot["received"]["eventText"], "Hello");
+        assert_eq!(snapshot["received"]["effectiveEventText"], "Hello");
+        assert_eq!(snapshot["received"]["resolvedCard"]["data"]["name"], "Rika");
+        assert_eq!(snapshot["assembled"]["user"], "Hello");
+        assert!(snapshot["assembled"]["blocks"].is_array());
+    }
+
+    #[test]
+    fn prompt_capture_records_generation_result_failure_and_cancel() {
+        let mut core = ready_core();
+        dispatch(&mut core, json!({"type":"uiPromptCaptureSettings","enabled":true,"integrationId":""}));
+        let accepted = socket(&mut core, reply("capture-result", false, false));
+        let operation = effect(&accepted, "gemmaInvoke")["operationId"].as_u64().unwrap();
+        let started = dispatch(&mut core, json!({"type":"gemmaStarted","operationId":operation,"generation":{"model":GEMMA_ID,"maxOutputTokens":256,"sampler":"top_k","temperature":0.8,"topK":40}}));
+        assert_eq!(effect(&started, "promptSnapshotGeneration")["generation"]["topK"], 40);
+        let completed = dispatch(&mut core, json!({"type":"gemmaCompleted","operationId":operation,"response":"Keep going.<joy_hopeful>","tokenCount":3,"elapsedMs":20}));
+        let finished = effect(&completed, "promptSnapshotFinished");
+        assert_eq!(finished["status"], "completed");
+        assert_eq!(finished["result"]["rawResponse"], "Keep going.<joy_hopeful>");
+        assert_eq!(finished["result"]["displayText"], "Keep going.");
+
+        let failed = socket(&mut core, reply("capture-failed", false, false));
+        let operation = effect(&failed, "gemmaInvoke")["operationId"].as_u64().unwrap();
+        let failure = dispatch(&mut core, json!({"type":"gemmaFailed","operationId":operation,"message":"bad generation"}));
+        assert_eq!(effect(&failure, "promptSnapshotFinished")["status"], "failed");
+
+        socket(&mut core, reply("capture-cancelled", false, false));
+        let cancel = socket(&mut core, { let mut value = envelope("request.cancel", "cancel-capture"); value.as_object_mut().unwrap().insert("requestId".into(), json!("capture-cancelled")); value });
+        assert_eq!(effect(&cancel, "promptSnapshotFinished")["status"], "cancelled");
+    }
+
+    #[test]
+    fn prompt_capture_records_transfer_and_resolved_card_for_all_card_modes() {
+        let mut core = ready_core();
+        dispatch(&mut core, json!({"type":"uiPromptCaptureSettings","enabled":true,"integrationId":"test"}));
+        let snapshot_batch = socket(&mut core, reply("card-snapshot", false, false));
+        assert_eq!(effect(&snapshot_batch, "promptSnapshotStarted")["snapshot"]["received"]["cardTransfer"]["mode"], "snapshot");
+        let operation = effect(&snapshot_batch, "gemmaInvoke")["operationId"].as_u64().unwrap();
+        dispatch(&mut core, json!({"type":"gemmaCompleted","operationId":operation,"response":"Done","tokenCount":1,"elapsedMs":1}));
+
+        let original = card(); let original_hash = hash_value(&original);
+        let mut reference = reply("card-reference", false, false);
+        reference.as_object_mut().unwrap().insert("card".into(), json!({"format":"chara_card_v2","mode":"reference","targetHash":original_hash}));
+        let reference_batch = socket(&mut core, reference);
+        let reference_received = &effect(&reference_batch, "promptSnapshotStarted")["snapshot"]["received"];
+        assert_eq!(reference_received["cardTransfer"]["mode"], "reference");
+        assert_eq!(reference_received["resolvedCard"]["data"]["name"], "Rika");
+        let operation = effect(&reference_batch, "gemmaInvoke")["operationId"].as_u64().unwrap();
+        dispatch(&mut core, json!({"type":"gemmaCompleted","operationId":operation,"response":"Done","tokenCount":1,"elapsedMs":1}));
+
+        let mut revised = original.clone(); *revised.pointer_mut("/data/description").unwrap() = json!("Revised survivor");
+        let mut patch = reply("card-patch", false, false);
+        patch.as_object_mut().unwrap().insert("card".into(), json!({"format":"chara_card_v2","mode":"patch","baseHash":original_hash,"targetHash":hash_value(&revised),"patch":[{"op":"replace","path":"/data/description","value":"Revised survivor"}]}));
+        let patch_batch = socket(&mut core, patch);
+        let patch_received = &effect(&patch_batch, "promptSnapshotStarted")["snapshot"]["received"];
+        assert_eq!(patch_received["cardTransfer"]["mode"], "patch");
+        assert_eq!(patch_received["resolvedCard"]["data"]["description"], "Revised survivor");
+    }
+
+    #[test]
+    fn response_processing_can_extract_all_matches_and_filter_only_text() {
+        let mut core = ready_core();
+        let mut request = reply("multiple-actions", false, true);
+        request.pointer_mut("/output").unwrap().as_object_mut().unwrap().insert("responseProcessing".into(), json!({"mode":"buffered","rules":[{"id":"actions","matcher":{"type":"regex","pattern":"\\[ACTION:([a-z_]+)\\]"},"captureGroup":1,"occurrence":"all","remove":"match","removeFrom":["text"]}]}));
+        let accepted = socket(&mut core, request);
+        let operation = effect(&accepted, "gemmaInvoke")["operationId"].as_u64().unwrap();
+        let completed = dispatch(&mut core, json!({"type":"gemmaCompleted","operationId":operation,"response":"Move [ACTION:take_cover] then wait [ACTION:reload].","tokenCount":8,"elapsedMs":20}));
+        let text = effects(&completed).iter().find(|value| value["messageType"] == "reply.text.completed").unwrap();
+        assert_eq!(text["payload"]["text"], "Move  then wait .");
+        assert_eq!(text["payload"]["extractedContent"]["actions"], json!(["take_cover", "reload"]));
+        assert_eq!(effect(&completed, "ttsInvoke")["text"], "Move [ACTION:take_cover] then wait [ACTION:reload].");
+    }
+
+    #[test]
+    fn unmatched_response_processing_rule_returns_an_empty_array_without_failing() {
+        let mut core = ready_core();
+        let mut request = reply("missing-match", false, true);
+        request.pointer_mut("/output").unwrap().as_object_mut().unwrap().insert("responseProcessing".into(), json!({"mode":"buffered","rules":[{"id":"emotion","matcher":{"type":"regex","pattern":"<([a-z_]+)>\\s*$"},"captureGroup":1,"occurrence":"last","remove":"match","removeFrom":["text","audio"]}]}));
+        let accepted = socket(&mut core, request);
+        let operation = effect(&accepted, "gemmaInvoke")["operationId"].as_u64().unwrap();
+        let completed = dispatch(&mut core, json!({"type":"gemmaCompleted","operationId":operation,"response":"Stay close.","tokenCount":3,"elapsedMs":20}));
+        let text = effects(&completed).iter().find(|value| value["messageType"] == "reply.text.completed").unwrap();
+        assert_eq!(text["payload"]["text"], "Stay close.");
+        assert_eq!(text["payload"]["extractedContent"]["emotion"], json!([]));
+        assert_eq!(effect(&completed, "ttsInvoke")["text"], "Stay close.");
     }
 
     #[test]

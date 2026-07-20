@@ -25,6 +25,12 @@ describe('RPEngine protocol v3', () => {
     const request = { ...base, output: { modalities: ['text'], language: 'en' } };
     expect(decodeEnvelope(JSON.stringify(request)).type).toBe('reply.request');
   });
+  it('accepts buffered regex response processing and rejects invalid rules', () => {
+    const responseProcessing = { mode: 'buffered', rules: [{ id: 'emotion', matcher: { type: 'regex', pattern: '<([a-z_]+)>\\s*$' }, captureGroup: 1, occurrence: 'last', remove: 'match', removeFrom: ['text', 'audio'] }] };
+    expect(decodeEnvelope(JSON.stringify({ ...base, output: { ...base.output, responseProcessing } })).type).toBe('reply.request');
+    expect(() => decodeEnvelope(JSON.stringify({ ...base, output: { ...base.output, responseProcessing: { ...responseProcessing, mode: 'streaming' } } }))).toThrow(/mode/);
+    expect(() => decodeEnvelope(JSON.stringify({ ...base, output: { ...base.output, responseProcessing: { mode: 'buffered', rules: [{ ...responseProcessing.rules[0], matcher: { type: 'regex', pattern: '(' } }] } } }))).toThrow(/Invalid responseProcessing regex/);
+  });
   it('accepts audio input with or without accompanying text', () => {
     const audio = { format: 'pcm_s16le', sampleRate: 16000, channels: 1, language: 'en', data: 'AAAA' };
     expect(decodeEnvelope(JSON.stringify({ ...base, event: { audio } })).type).toBe('reply.request');

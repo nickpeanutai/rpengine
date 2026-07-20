@@ -50,7 +50,10 @@ export class RuntimeAdapter {
   cancelGemma(operationId: number) { this.gemma?.cancel(operationId); }
   dispose() { this.gemma?.dispose(); this.stt?.dispose(); this.tts?.dispose(); this.gemma = undefined; this.stt = undefined; this.tts = undefined; }
   private create() {
-    this.gemma = new GemmaClient((operationId, chunk) => this.dispatch({ type: 'gemmaDelta', operationId, chunk }));
+    this.gemma = new GemmaClient(
+      (operationId, chunk) => this.dispatch({ type: 'gemmaDelta', operationId, chunk }),
+      message => this.dispatch({ type: 'gemmaStarted', operationId: message.operationId, generation: message.generation }),
+    );
     this.stt = new SttClient(() => undefined);
     this.tts = new TtsClient(() => undefined);
   }

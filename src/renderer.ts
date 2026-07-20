@@ -1,5 +1,6 @@
 import type { AppViewModelV4 } from './core-contract';
 import { DiagnosticLog } from './diagnostics';
+import { PromptSnapshotStore } from './prompt-snapshots';
 
 const $ = <T extends HTMLElement>(selector: string) => { const element = document.querySelector<T>(selector); if (!element) throw new Error(`Missing element: ${selector}`); return element; };
 
@@ -27,6 +28,17 @@ export class AppRenderer {
       return entry.level === 'error' && entry.details !== undefined ? `<details class="log-line error"><summary>${line}</summary><pre>${escapeHTML(stringify(entry.details))}</pre></details>` : `<div class="log-line ${entry.level}">${line}</div>`;
     }).join('') || '<div class="terminal-empty"><span>$</span> Waiting for model activity…</div>';
     container.scrollTop = container.scrollHeight;
+  }
+
+  renderPromptInspector(store: PromptSnapshotStore, selectedOperationId?: number) {
+    const entries = [...store.entries].reverse();
+    $('#promptSnapshotCount').textContent = `${entries.length} snapshot${entries.length === 1 ? '' : 's'}`;
+    $('#promptSnapshotList').innerHTML = entries.map(entry => `<button type="button" class="prompt-snapshot-item${entry.operationId === selectedOperationId ? ' selected' : ''}" data-prompt-operation="${entry.operationId}"><strong>${escapeHTML(entry.integrationId || 'unknown')} · ${escapeHTML(entry.characterId || 'unknown')}</strong><span>${escapeHTML(entry.requestId)}</span><small>${escapeHTML(new Date(entry.capturedAt).toLocaleString())} · <span class="snapshot-status">${escapeHTML(entry.status)}</span></small></button>`).join('') || '<div class="terminal-empty"><span>$</span> No prompt snapshots captured.</div>';
+    const selected = store.get(selectedOperationId);
+    $('#promptSnapshotDetail').textContent = selected ? stringify(selected) : 'No prompt snapshot selected.';
+    ($('#copyPromptSnapshotButton') as HTMLButtonElement).disabled = !selected;
+    ($('#exportPromptSnapshotsButton') as HTMLButtonElement).disabled = entries.length === 0;
+    ($('#clearPromptSnapshotsButton') as HTMLButtonElement).disabled = entries.length === 0;
   }
 }
 

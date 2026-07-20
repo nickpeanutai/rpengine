@@ -132,6 +132,44 @@
         </label>
         <div id="modelEntries" class="model-entries"></div>
         <p>Downloaded models are stored on this device. They remain installed after you close the app and are available when you reopen it.</p>
+        <section class="developer-settings" aria-labelledby="developerSettingsTitle">
+          <div>
+            <p class="section-label">Developer</p>
+            <h3 id="developerSettingsTitle">Prompt Inspector</h3>
+          </div>
+          <label class="toggle-field" for="promptCaptureEnabled">
+            <input id="promptCaptureEnabled" type="checkbox" />
+            <span>Capture prompt snapshots</span>
+          </label>
+          <label class="language-field" for="promptCaptureIntegrationId">
+            <span>Integration ID filter</span>
+            <input id="promptCaptureIntegrationId" type="text" spellcheck="false" placeholder="All integrations" />
+          </label>
+          <p>Snapshots may contain private conversations and complete character prompts. They remain in memory until cleared or this page closes.</p>
+          <button id="openPromptInspectorButton" type="button" class="secondary">Open Prompt Inspector</button>
+        </section>
+      </div>
+    </dialog>
+
+    <dialog id="promptInspectorDialog" class="prompt-inspector-dialog" aria-labelledby="promptInspectorTitle">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">Developer tool</p>
+          <h2 id="promptInspectorTitle">Prompt Inspector</h2>
+        </div>
+        <form method="dialog"><button type="submit" class="secondary compact">Close</button></form>
+      </header>
+      <div class="prompt-inspector-toolbar">
+        <span id="promptSnapshotCount">0 snapshots</span>
+        <div class="actions">
+          <button id="copyPromptSnapshotButton" type="button" class="secondary compact">Copy JSON</button>
+          <button id="exportPromptSnapshotsButton" type="button" class="secondary compact">Export JSON</button>
+          <button id="clearPromptSnapshotsButton" type="button" class="secondary compact">Clear</button>
+        </div>
+      </div>
+      <div class="prompt-inspector">
+        <div id="promptSnapshotList" class="prompt-snapshot-list" aria-label="Captured prompt snapshots"></div>
+        <pre id="promptSnapshotDetail" class="prompt-snapshot-detail">No prompt snapshots captured.</pre>
       </div>
     </dialog>
 

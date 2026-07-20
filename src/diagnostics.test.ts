@@ -19,4 +19,10 @@ describe('DiagnosticLog activity updates', () => {
     expect(log.entries[0].details).toBeUndefined();
     expect(log.entries[1].details).toEqual({ message: 'network interrupted' });
   });
+
+  it('only includes prompt snapshots when explicitly supplied', async () => {
+    const log = new DiagnosticLog();
+    expect(JSON.parse(await log.export().text())).not.toHaveProperty('promptSnapshots');
+    expect(JSON.parse(await log.export([{ requestId: 'request-1' }]).text()).promptSnapshots).toEqual([{ requestId: 'request-1' }]);
+  });
 });

@@ -8,7 +8,7 @@ describe('generated ABI v4 contract', () => {
   it('matches the runtime ABI and returns a Rust-owned view model', () => {
     expect(core_abi_version()).toBe(3);
     const core = new CoreSession();
-    const batch = dispatchCore(core, { type: 'bootstrap', appVersion: 'test', language: 'en', port: 38471 });
+    const batch = dispatchCore(core, { type: 'bootstrap', appVersion: 'test', language: 'en', port: 38471, promptCaptureEnabled: false, promptCaptureIntegrationId: '' });
     expect(batch.abiVersion).toBe(4);
     expect(batch.effects.some(effect => effect.type === 'modelsRefresh')).toBe(true);
     const render = batch.effects.find(effect => effect.type === 'render');
@@ -22,6 +22,7 @@ describe('generated ABI v4 contract', () => {
         case 'ownershipAcquire': case 'ownershipRelease': case 'ownershipPhase': case 'modelsRefresh':
         case 'modelDownload': case 'modelCancel': case 'modelDelete': case 'modelCleanup': case 'runtimesLoad': case 'runtimesDispose':
         case 'microphoneEnable': case 'microphoneDisable': case 'captureStart': case 'captureStop': case 'captureCancel': case 'sttInvoke':
+        case 'promptSnapshotStarted': case 'promptSnapshotGeneration': case 'promptSnapshotFinished':
         case 'gemmaInvoke': case 'gemmaCancel': case 'ttsInvoke': case 'replyAudioTransport': case 'diagnostic': case 'render': return effect.type;
         default: return assertNever(effect);
       }

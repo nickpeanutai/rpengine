@@ -19,6 +19,8 @@ const LANGUAGE_KEY = 'rp-engine.language';
 const VOICE_KEY = 'rp-engine.voice';
 const PORT_KEY = 'rp-engine.port';
 const TRANSPORT_KEY = 'rp-engine.transport';
+const PROMPT_CAPTURE_KEY = 'rp-engine.prompt-capture';
+const PROMPT_CAPTURE_INTEGRATION_KEY = 'rp-engine.prompt-capture-integration';
 export const DEFAULT_RP_ENGINE_PORT = 38471;
 
 function defaultLanguage(): MoonshineLanguage {
@@ -60,3 +62,7 @@ export function saveRPEnginePort(value: number) {
 
 export function loadTransportKind(): TransportKind { return localStorage.getItem(TRANSPORT_KEY) === 'filesystem' ? 'filesystem' : 'websocket'; }
 export function saveTransportKind(value: TransportKind) { localStorage.setItem(TRANSPORT_KEY, value); }
+export function loadPromptCaptureEnabled() { return localStorage.getItem(PROMPT_CAPTURE_KEY) === 'true'; }
+export function savePromptCaptureEnabled(value: boolean) { localStorage.setItem(PROMPT_CAPTURE_KEY, String(value)); }
+export function loadPromptCaptureIntegrationId() { return localStorage.getItem(PROMPT_CAPTURE_INTEGRATION_KEY)?.trim() ?? ''; }
+export function savePromptCaptureIntegrationId(value: string) { localStorage.setItem(PROMPT_CAPTURE_INTEGRATION_KEY, value.trim()); }

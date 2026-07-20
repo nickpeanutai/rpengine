@@ -16,7 +16,7 @@
 
 ## Local AI for character-driven games
 
-RPEngine is an installable, game-neutral character-response compute provider. A game integration hosts an authenticated loopback WebSocket endpoint and this PWA connects outbound. The integration supplies Character Card V2 data and event text; RPEngine owns prompt assembly, Gemma inference, Moonshine speech recognition, Supertonic synthesis, and streamed responses.
+RPEngine is an installable, game-neutral character-response compute provider. A game integration communicates through either an authenticated loopback WebSocket endpoint or the generic filesystem mailbox transport. The integration supplies Character Card V2 data and event text; RPEngine owns prompt assembly, Gemma inference, Moonshine speech recognition, Supertonic synthesis, and streamed responses.
 
 | Capability | What it provides |
 | --- | --- |

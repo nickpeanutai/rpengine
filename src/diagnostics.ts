@@ -44,9 +44,11 @@ export class DiagnosticLog extends EventTarget {
     this.dispatchEvent(new Event('change'));
   }
 
-  export() {
+  export(promptSnapshots?: unknown[]) {
     const entries = this.entries.map(({ activityKey: _activityKey, ...entry }) => entry);
-    return new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), entries }, null, 2)], {
+    const payload: { exportedAt: string; entries: typeof entries; promptSnapshots?: unknown[] } = { exportedAt: new Date().toISOString(), entries };
+    if (promptSnapshots !== undefined) payload.promptSnapshots = promptSnapshots;
+    return new Blob([JSON.stringify(payload, null, 2)], {
       type: 'application/json',
     });
   }

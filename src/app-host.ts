@@ -3,12 +3,13 @@ import { APP_VERSION } from './app-version';
 import { dispatchCore, dispatchCoreAudio, takeCoreReplyAudioSegment, type CoreEffectV4, type HostAudioEventV4, type HostEventV4 } from './core-contract';
 import { BrowserVoiceCapture } from './browser-voice-capture';
 import { DiagnosticLog } from './diagnostics';
+import { PromptSnapshotStore } from './prompt-snapshots';
 import { EngineOwnership, type EngineOwnerPhase } from './engine-ownership';
 import { ModelAdapter } from './model-adapter';
 import { AppRenderer, element } from './renderer';
 import { RuntimeAdapter } from './runtime-adapter';
 import { connectionPortFromFragment } from './protocol';
-import { loadLanguage, loadRPEnginePort, loadTransportKind, saveLanguage, saveRPEnginePort, saveTransportKind } from './settings';
+import { loadLanguage, loadPromptCaptureEnabled, loadPromptCaptureIntegrationId, loadRPEnginePort, loadTransportKind, saveLanguage, savePromptCaptureEnabled, savePromptCaptureIntegrationId, saveRPEnginePort, saveTransportKind } from './settings';
 import { SocketAdapter } from './socket-adapter';
 import { FileSystemMailboxAdapter } from './filesystem-mailbox-adapter';
 import { getTransportHandle, putTransportHandle } from './history';
@@ -20,6 +21,7 @@ type QueuedEvent = { event: HostEventV4 } | { event: HostAudioEventV4; samples: 
 export class AppHost {
   private readonly core = new CoreSession();
   private readonly diagnostics = new DiagnosticLog();
+  private readonly promptSnapshots = new PromptSnapshotStore();
   private readonly renderer = new AppRenderer();
   private readonly ownership = new EngineOwnership();
   private readonly capture = new BrowserVoiceCapture(entry => this.diagnostics.add(entry.level, 'voice-capture', entry.message, entry.details));
@@ -32,6 +34,10 @@ export class AppHost {
   private readonly failedAudioRequests = new Set<string>();
   private queue: QueuedEvent[] = [];
   private draining = false;
+  private promptCaptureEnabled = loadPromptCaptureEnabled();
+  private promptCaptureIntegrationId = loadPromptCaptureIntegrationId();
+  private selectedPromptOperationId?: number;
+  private promptInspectorFollowingLatest = true;
 
   constructor() {
     this.models = new ModelAdapter([GEMMA_MODEL_ID, SUPERTONIC_MODEL_ID, ...Object.values(MOONSHINE_MODEL_IDS)], status => this.dispatch({ type: 'modelStatus', status }));
@@ -48,12 +54,14 @@ export class AppHost {
     this.bind();
     this.updateTransportControls();
     this.diagnostics.addEventListener('change', () => this.renderer.renderDiagnostics(this.diagnostics));
+    this.promptSnapshots.addEventListener('change', () => this.renderPromptInspector());
     this.ownership.addEventListener('change', () => this.dispatch({ type: 'ownershipOther', active: this.ownership.ownerElsewhere, phase: this.ownership.ownerElsewherePhase }));
     this.renderer.renderDiagnostics(this.diagnostics);
+    this.renderer.renderPromptInspector(this.promptSnapshots);
     let port = loadRPEnginePort();
     try { port = connectionPortFromFragment() ?? port; } catch { /* Invalid fragments are ignored by the browser adapter. */ }
     if (location.hash) history.replaceState(null, '', `${location.pathname}${location.search}`);
-    this.dispatch({ type: 'bootstrap', appVersion: APP_VERSION, language: loadLanguage(), port });
+    this.dispatch({ type: 'bootstrap', appVersion: APP_VERSION, language: loadLanguage(), port, promptCaptureEnabled: this.promptCaptureEnabled, promptCaptureIntegrationId: this.promptCaptureIntegrationId });
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(error => this.diagnostics.add('error', 'system', 'Service worker registration failed', details(error)));
   }
 
@@ -104,6 +112,12 @@ export class AppHost {
         void this.runtime.transcribe(effect.operationId, samples, effect.language as MoonshineLanguage).catch(error => this.dispatch({ type: 'sttFailed', operationId: effect.operationId, message: message(error) }));
         break;
       }
+      case 'promptSnapshotStarted':
+        if (this.promptInspectorFollowingLatest) this.selectedPromptOperationId = effect.operationId;
+        this.promptSnapshots.start(effect.operationId, effect.snapshot);
+        break;
+      case 'promptSnapshotGeneration': this.promptSnapshots.setGeneration(effect.operationId, effect.generation); break;
+      case 'promptSnapshotFinished': this.promptSnapshots.finish(effect.operationId, effect.status, effect.result, effect.error); break;
       case 'gemmaInvoke': void this.runtime.generate(effect.operationId, effect.system, effect.user, effect.history).catch(error => this.dispatch({ type: 'gemmaFailed', operationId: effect.operationId, message: message(error) })); break;
       case 'gemmaCancel': this.runtime.cancelGemma(effect.operationId); break;
       case 'ttsInvoke': void this.runtime.synthesize(effect.operationId, effect.text, effect.language, effect.voice).catch(error => this.dispatch({ type: 'ttsFailed', operationId: effect.operationId, message: message(error) })); break;
@@ -143,8 +157,45 @@ export class AppHost {
     element<HTMLSelectElement>('#transportSelect').addEventListener('change', event => this.changeTransport((event.target as HTMLSelectElement).value as TransportKind));
     element<HTMLButtonElement>('#chooseMailboxButton').addEventListener('click', () => void this.chooseMailbox());
     element('#modelEntries').addEventListener('click', event => { const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-model-action]'); if (button) this.dispatch({ type: 'uiModelAction', modelId: button.dataset.modelId!, action: button.dataset.modelAction as 'download' | 'cancel' | 'delete' }); });
-    element<HTMLButtonElement>('#exportLogButton').addEventListener('click', () => { const url = URL.createObjectURL(this.diagnostics.export()); const link = document.createElement('a'); link.href = url; link.download = `rpengine-diagnostics-${new Date().toISOString().replaceAll(':', '-')}.json`; link.click(); URL.revokeObjectURL(url); });
+    const captureEnabled = element<HTMLInputElement>('#promptCaptureEnabled'); captureEnabled.checked = this.promptCaptureEnabled;
+    const captureIntegration = element<HTMLInputElement>('#promptCaptureIntegrationId'); captureIntegration.value = this.promptCaptureIntegrationId; captureIntegration.disabled = !this.promptCaptureEnabled;
+    captureEnabled.addEventListener('change', () => {
+      this.promptCaptureEnabled = captureEnabled.checked; captureIntegration.disabled = !this.promptCaptureEnabled;
+      savePromptCaptureEnabled(this.promptCaptureEnabled); this.resetPromptSnapshots(); this.publishPromptCaptureSettings();
+    });
+    captureIntegration.addEventListener('input', () => {
+      this.promptCaptureIntegrationId = captureIntegration.value.trim(); captureIntegration.value = this.promptCaptureIntegrationId;
+      savePromptCaptureIntegrationId(this.promptCaptureIntegrationId); this.resetPromptSnapshots(); this.publishPromptCaptureSettings();
+    });
+    element<HTMLButtonElement>('#openPromptInspectorButton').addEventListener('click', () => {
+      element<HTMLDialogElement>('#settingsDialog').close(); this.renderPromptInspector(); element<HTMLDialogElement>('#promptInspectorDialog').showModal();
+    });
+    element('#promptSnapshotList').addEventListener('click', event => {
+      const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-prompt-operation]'); if (!button) return;
+      this.selectedPromptOperationId = Number(button.dataset.promptOperation);
+      this.promptInspectorFollowingLatest = this.promptSnapshots.latest()?.operationId === this.selectedPromptOperationId;
+      this.renderPromptInspector();
+    });
+    element<HTMLButtonElement>('#copyPromptSnapshotButton').addEventListener('click', () => void this.copyPromptSnapshot());
+    element<HTMLButtonElement>('#exportPromptSnapshotsButton').addEventListener('click', () => this.downloadJson(`rpengine-prompts-${timestamp()}.json`, { exportedAt: new Date().toISOString(), promptSnapshots: this.promptSnapshots.exportValue() }));
+    element<HTMLButtonElement>('#clearPromptSnapshotsButton').addEventListener('click', () => this.resetPromptSnapshots());
+    element<HTMLButtonElement>('#exportLogButton').addEventListener('click', () => this.downloadBlob(`rpengine-diagnostics-${timestamp()}.json`, this.diagnostics.export(this.promptCaptureEnabled ? this.promptSnapshots.exportValue() : undefined)));
   }
+
+  private publishPromptCaptureSettings() { this.dispatch({ type: 'uiPromptCaptureSettings', enabled: this.promptCaptureEnabled, integrationId: this.promptCaptureIntegrationId }); }
+  private resetPromptSnapshots() { this.selectedPromptOperationId = undefined; this.promptInspectorFollowingLatest = true; this.promptSnapshots.clear(); }
+  private renderPromptInspector() {
+    if (this.selectedPromptOperationId !== undefined && !this.promptSnapshots.get(this.selectedPromptOperationId)) { this.selectedPromptOperationId = undefined; }
+    if (this.selectedPromptOperationId === undefined && this.promptSnapshots.latest()) { this.selectedPromptOperationId = this.promptSnapshots.latest()!.operationId; this.promptInspectorFollowingLatest = true; }
+    this.renderer.renderPromptInspector(this.promptSnapshots, this.selectedPromptOperationId);
+  }
+  private async copyPromptSnapshot() {
+    const snapshot = this.promptSnapshots.get(this.selectedPromptOperationId); if (!snapshot) return;
+    try { await navigator.clipboard.writeText(JSON.stringify(snapshot, null, 2)); }
+    catch (error) { this.diagnostics.add('error', 'prompt-inspector', 'Could not copy prompt snapshot', details(error)); }
+  }
+  private downloadJson(filename: string, value: unknown) { this.downloadBlob(filename, new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' })); }
+  private downloadBlob(filename: string, blob: Blob) { const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = filename; link.click(); URL.revokeObjectURL(url); }
 
   private transportEvents(): TransportEvents {
     return { opened: () => this.dispatch({ type: 'transportOpened' }), message: raw => this.dispatch({ type: 'transportMessage', raw }), closed: (code, reason) => this.dispatch({ type: 'transportClosed', code, reason }), error: message => this.dispatch({ type: 'transportError', message }) };
@@ -192,3 +243,4 @@ function assertNever(value: never): never { throw new Error(`Unhandled core effe
 function message(error: unknown) { return error instanceof Error ? error.message : String(error); }
 function details(error: unknown) { return error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) }; }
 function isAbort(error: unknown) { return error instanceof DOMException && error.name === 'AbortError'; }
+function timestamp() { return new Date().toISOString().replaceAll(':', '-'); }

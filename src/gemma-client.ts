@@ -3,7 +3,10 @@ import type { WorkerRequestV2, WorkerResultV2 } from './core-contract';
 export class GemmaClient {
   private readonly worker = new Worker(new URL('./gemma.worker.ts', import.meta.url));
   private pending = new Map<number, { resolve: (value: WorkerResultV2) => void; reject: (reason?: unknown) => void }>();
-  constructor(private readonly onChunk: (operationId: number, chunk: string) => void) {
+  constructor(
+    private readonly onChunk: (operationId: number, chunk: string) => void,
+    private readonly onGenerationStarted: (message: Extract<WorkerResultV2, { type: 'generationStarted' }>) => void,
+  ) {
     this.worker.onmessage = event => this.receive(event.data as WorkerResultV2);
     this.worker.onerror = event => this.rejectAll(new Error(event.message));
   }
@@ -14,6 +17,7 @@ export class GemmaClient {
   private request(payload: WorkerRequestV2) { return new Promise<WorkerResultV2>((resolve, reject) => { this.pending.set(payload.operationId, { resolve, reject }); this.worker.postMessage(payload); }); }
   private receive(message: WorkerResultV2) {
     if (message.type === 'chunk') { this.onChunk(message.operationId, message.chunk); return; }
+    if (message.type === 'generationStarted') { this.onGenerationStarted(message); return; }
     const pending = this.pending.get(message.operationId); if (!pending) return;
     if (message.type === 'error') pending.reject(new Error(message.error)); else pending.resolve(message);
     this.pending.delete(message.operationId);
