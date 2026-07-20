@@ -58,7 +58,12 @@ Clones are scoped to `integrationId + characterId` within one connection session
 
 `output.modalities` always includes `text` and optionally includes `audio`. Audio requests must carry the Supertonic 3 model and voice descriptor; voice selection is therefore owned by the calling game rather than PWA settings. `output.language` is required. `player` is optional and defaults to `Player`. `event.text` becomes the newest user-role message. Requests are stateless and processed FIFO.
 
-`output.audio.processing` is optional. Omitting it preserves the natural Supertonic output. The game-neutral `narrowband_voice` profile band-limits, compresses, and mildly saturates speech for integrations such as phones, intercoms, and radios. Processing is applied before PCM transport, so WebSocket and filesystem integrations receive the same audio treatment when they request the profile.
+`output.audio.processing` is optional. Omitting it preserves the natural Supertonic output. Supported game-neutral profiles are:
+
+- `narrowband_voice`: band-limits, compresses, and mildly saturates speech for phones, intercoms, and clean radio systems.
+- `cinematic_radio`: applies a steeper communications band, presence emphasis, aggressive compression, codec coloration, quiet carrier texture, and restrained deterministic crackle/dropouts while preserving intelligibility.
+
+Processing is applied before PCM transport, so WebSocket and filesystem integrations receive the same audio treatment when they request a profile.
 
 ## Responses
 

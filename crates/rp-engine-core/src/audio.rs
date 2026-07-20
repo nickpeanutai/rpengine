@@ -9,12 +9,14 @@ const PCM_CHUNK_BYTES: usize = 32 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AudioProcessingProfile {
     NarrowbandVoice,
+    CinematicRadio,
 }
 
 impl AudioProcessingProfile {
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         match name {
             "narrowband_voice" => Some(Self::NarrowbandVoice),
+            "cinematic_radio" => Some(Self::CinematicRadio),
             _ => None,
         }
     }
@@ -77,6 +79,103 @@ fn compress_and_saturate(samples: &mut [f32], sample_rate: f64) {
     }
 }
 
+fn peaking_eq(samples: &mut [f32], sample_rate: f64, frequency: f64, q: f64, gain_db: f64) {
+    if samples.is_empty() || sample_rate <= 0.0 { return; }
+    let omega = std::f64::consts::TAU * frequency / sample_rate;
+    let cosine = omega.cos();
+    let alpha = omega.sin() / (2.0 * q);
+    let amplitude = 10.0_f64.powf(gain_db / 40.0);
+    let a0 = 1.0 + alpha / amplitude;
+    let b0 = (1.0 + alpha * amplitude) / a0;
+    let b1 = (-2.0 * cosine) / a0;
+    let b2 = (1.0 - alpha * amplitude) / a0;
+    let a1 = (-2.0 * cosine) / a0;
+    let a2 = (1.0 - alpha / amplitude) / a0;
+    let (mut x1, mut x2, mut y1, mut y2) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+    for sample in samples {
+        let x = *sample as f64;
+        let y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1; x1 = x; y2 = y1; y1 = y;
+        *sample = y as f32;
+    }
+}
+
+fn mu_law_quantize(sample: f32) -> f32 {
+    let mu = 255.0_f64;
+    let value = (sample as f64).clamp(-1.0, 1.0);
+    let encoded = value.signum() * (1.0 + mu * value.abs()).ln() / (1.0 + mu).ln();
+    let quantized = (encoded * 127.0).round() / 127.0;
+    (quantized.signum() * ((1.0 + mu).powf(quantized.abs()) - 1.0) / mu) as f32
+}
+
+fn codec_color(samples: &mut [f32], sample_rate: f64) {
+    if samples.is_empty() || sample_rate <= 0.0 { return; }
+    let codec_rate = sample_rate.min(8_000.0);
+    let mut narrow = resample_audio(samples, sample_rate, codec_rate).unwrap_or_else(|_| samples.to_vec());
+    for sample in &mut narrow { *sample = mu_law_quantize(*sample); }
+    let restored = resample_audio(&narrow, codec_rate, sample_rate).unwrap_or(narrow);
+    let fallback = restored.last().copied().unwrap_or(0.0);
+    for (index, sample) in samples.iter_mut().enumerate() { *sample = restored.get(index).copied().unwrap_or(fallback); }
+}
+
+fn cinematic_dynamics(samples: &mut [f32], sample_rate: f64) {
+    if samples.is_empty() || sample_rate <= 0.0 { return; }
+    let threshold = 10.0_f64.powf(-24.0 / 20.0);
+    let makeup = 10.0_f64.powf(6.0 / 20.0);
+    let attack = (-1.0 / (0.002 * sample_rate)).exp();
+    let release = (-1.0 / (0.055 * sample_rate)).exp();
+    let drive = 2.2_f64;
+    let bias = 0.16_f64;
+    let positive_scale = (drive + bias).tanh() - bias.tanh();
+    let negative_scale = (-drive + bias).tanh() - bias.tanh();
+    let saturation_scale = positive_scale.abs().max(negative_scale.abs());
+    let mut envelope = 0.0_f64;
+    for sample in samples.iter_mut() {
+        let level = (*sample as f64).abs();
+        let coefficient = if level > envelope { attack } else { release };
+        envelope = coefficient * envelope + (1.0 - coefficient) * level;
+        let gain = if envelope > threshold {
+            let over_db = 20.0 * (envelope / threshold).log10();
+            10.0_f64.powf((-(1.0 - 1.0 / 6.0) * over_db) / 20.0)
+        } else { 1.0 };
+        let driven = *sample as f64 * gain * makeup;
+        *sample = (((driven * drive + bias).tanh() - bias.tanh()) / saturation_scale) as f32;
+    }
+
+    let mut noise = vec![0.0_f32; samples.len()];
+    let mut state = 0x6d2b_79f5_u32;
+    for sample in &mut noise {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *sample = ((state as f64 / u32::MAX as f64) * 2.0 - 1.0) as f32;
+    }
+    biquad(&mut noise, sample_rate, 320.0, 0.707, BiquadKind::HighPass);
+    biquad(&mut noise, sample_rate, 2_900.0, 0.707, BiquadKind::LowPass);
+    for (sample, texture) in samples.iter_mut().zip(noise) { *sample += texture * 0.0045; }
+
+    let interval = (sample_rate * 0.67).round().max(1.0) as usize;
+    let width = (sample_rate * 0.003).round().max(1.0) as usize;
+    for center in (interval / 2..samples.len()).step_by(interval) {
+        for offset in 0..width {
+            let index = center + offset;
+            if index >= samples.len() { break; }
+            let phase = std::f64::consts::PI * offset as f64 / width as f64;
+            samples[index] *= (1.0 - 0.28 * phase.sin()) as f32;
+        }
+        if center < samples.len() { samples[center] += 0.018; }
+        if center + 1 < samples.len() { samples[center + 1] -= 0.012; }
+    }
+
+    for sample in samples.iter_mut() { *sample = (*sample).clamp(-0.92, 0.92); }
+    let fade_samples = (sample_rate * 0.005).round() as usize;
+    let fade_samples = fade_samples.min(samples.len() / 2);
+    for index in 0..fade_samples {
+        let gain = index as f32 / fade_samples.max(1) as f32;
+        samples[index] *= gain;
+        let end = samples.len() - 1 - index;
+        samples[end] *= gain;
+    }
+}
+
 pub(crate) fn process_output_audio(samples: &[f32], sample_rate: u32, profile: AudioProcessingProfile) -> Vec<f32> {
     let mut output = samples.to_vec();
     match profile {
@@ -85,6 +184,14 @@ pub(crate) fn process_output_audio(samples: &[f32], sample_rate: u32, profile: A
             biquad(&mut output, sample_rate, 300.0, 0.707, BiquadKind::HighPass);
             biquad(&mut output, sample_rate, 3_400.0, 0.707, BiquadKind::LowPass);
             compress_and_saturate(&mut output, sample_rate);
+        }
+        AudioProcessingProfile::CinematicRadio => {
+            let sample_rate = sample_rate as f64;
+            for _ in 0..2 { biquad(&mut output, sample_rate, 320.0, 0.707, BiquadKind::HighPass); }
+            for _ in 0..2 { biquad(&mut output, sample_rate, 2_900.0, 0.707, BiquadKind::LowPass); }
+            peaking_eq(&mut output, sample_rate, 1_800.0, 1.0, 5.0);
+            codec_color(&mut output, sample_rate);
+            cinematic_dynamics(&mut output, sample_rate);
         }
     }
     output
@@ -264,5 +371,33 @@ mod tests {
         let middle_rms = rms(&middle[2_205..]);
         assert!(rms(&low[2_205..]) < middle_rms * 0.25);
         assert!(rms(&high[2_205..]) < middle_rms * 0.25);
+    }
+
+    #[test]
+    fn cinematic_radio_is_deterministic_finite_and_length_preserving() {
+        let input = sine(1_000.0, 0.75);
+        let first = process_output_audio(&input, 44_100, AudioProcessingProfile::CinematicRadio);
+        let second = process_output_audio(&input, 44_100, AudioProcessingProfile::CinematicRadio);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), input.len());
+        assert!(first.iter().all(|sample| sample.is_finite() && sample.abs() <= 0.92));
+        assert_eq!(first[0], 0.0);
+        assert!(first[first.len() - 1].abs() < 0.001);
+        let narrowband = process_output_audio(&input, 44_100, AudioProcessingProfile::NarrowbandVoice);
+        let difference = first.iter().zip(narrowband).map(|(left, right)| (*left as f64 - right as f64).powi(2)).sum::<f64>();
+        assert!((difference / first.len() as f64).sqrt() > 0.02);
+    }
+
+    #[test]
+    fn cinematic_radio_keeps_speech_clear_while_adding_a_quiet_carrier_texture() {
+        let low = process_output_audio(&sine(100.0, 1.0), 44_100, AudioProcessingProfile::CinematicRadio);
+        let middle = process_output_audio(&sine(1_000.0, 1.0), 44_100, AudioProcessingProfile::CinematicRadio);
+        let high = process_output_audio(&sine(8_000.0, 1.0), 44_100, AudioProcessingProfile::CinematicRadio);
+        let quiet = process_output_audio(&vec![0.0; 44_100], 44_100, AudioProcessingProfile::CinematicRadio);
+        let middle_rms = rms(&middle[2_205..]);
+        assert!(rms(&low[2_205..]) < middle_rms * 0.20);
+        assert!(rms(&high[2_205..]) < middle_rms * 0.20);
+        assert!(rms(&quiet[2_205..]) > 0.0005);
+        assert!(rms(&quiet[2_205..]) < 0.01);
     }
 }
