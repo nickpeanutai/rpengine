@@ -836,6 +836,21 @@ impl CoreSession {
         }
         let generated = object.get("response").and_then(Value::as_str).filter(|value| !value.is_empty()).unwrap_or(&active.raw).to_string();
         let processed = active.response_processing.as_ref().map(|processing| processing.process(&generated));
+        if let (Some(processing), Some(processed)) = (active.response_processing.as_ref(), processed.as_ref()) {
+            let rules = processing.diagnostic_rules(&processed.extracted);
+            let summary = rules.as_array().map(|rules| rules.iter().map(|rule| {
+                let id = rule.get("id").and_then(Value::as_str).unwrap_or("rule");
+                let count = rule.get("matchCount").and_then(Value::as_u64).unwrap_or(0);
+                format!("{id}={count}")
+            }).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+            self.diagnostic(effects, "debug", "response-processing", &format!("Response processing completed for request {}: {summary}.", active.request_id), Some(json!({
+                "requestId":active.request_id,
+                "rules":rules,
+                "generatedBytes":generated.len(),
+                "displayBytes":processed.text.len(),
+                "audioBytes":processed.audio.len()
+            })));
+        }
         let text_source = processed.as_ref().map(|value| value.text.as_str()).unwrap_or(&generated);
         let audio_source = processed.as_ref().map(|value| value.audio.as_str()).unwrap_or(&generated);
         if let Some(speech) = active.speech.as_mut() { if let Err(error) = enqueue_chunks(speech, audio_source, true) { self.active = Some(active); self.fail_active("request_failed", error, effects); return; } }
@@ -1245,6 +1260,10 @@ mod tests {
         assert_eq!(text["payload"]["text"], "Keep moving.");
         assert_eq!(text["payload"]["extractedContent"]["emotion"], json!(["fear_anxious"]));
         assert_eq!(effect(&completed, "ttsInvoke")["text"], "Keep moving.");
+        let diagnostic = effects(&completed).iter().find(|value| value["type"] == "diagnostic" && value["category"] == "response-processing").unwrap();
+        assert_eq!(diagnostic["details"]["requestId"], "processed");
+        assert_eq!(diagnostic["details"]["rules"][0], json!({"id":"emotion","matchCount":1,"removedFrom":["text","audio"]}));
+        assert_eq!(diagnostic["details"]["generatedBytes"], 26);
     }
 
     #[test]
@@ -1364,6 +1383,8 @@ mod tests {
         assert_eq!(text["payload"]["text"], "Stay close.");
         assert_eq!(text["payload"]["extractedContent"]["emotion"], json!([]));
         assert_eq!(effect(&completed, "ttsInvoke")["text"], "Stay close.");
+        let diagnostic = effects(&completed).iter().find(|value| value["type"] == "diagnostic" && value["category"] == "response-processing").unwrap();
+        assert_eq!(diagnostic["details"]["rules"][0]["matchCount"], 0);
     }
 
     #[test]

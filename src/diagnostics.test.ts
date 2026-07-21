@@ -11,13 +11,15 @@ describe('DiagnosticLog activity updates', () => {
     expect(log.entries[0].message).toBe('Downloading Model A — 40%');
   });
 
-  it('keeps detailed payloads only for errors', () => {
+  it('keeps detailed payloads only for errors and privacy-safe response processing summaries', () => {
     const log = new DiagnosticLog();
     log.add('info', 'model', 'Downloading', { internal: 'not exported' });
+    log.add('debug', 'response-processing', 'method=1', { requestId: 'request-1', rules: [{ id: 'method', matchCount: 1 }] });
     log.add('error', 'model', 'Download failed', { message: 'network interrupted' });
 
     expect(log.entries[0].details).toBeUndefined();
-    expect(log.entries[1].details).toEqual({ message: 'network interrupted' });
+    expect(log.entries[1].details).toEqual({ requestId: 'request-1', rules: [{ id: 'method', matchCount: 1 }] });
+    expect(log.entries[2].details).toEqual({ message: 'network interrupted' });
   });
 
   it('only includes prompt snapshots when explicitly supplied', async () => {

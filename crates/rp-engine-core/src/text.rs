@@ -2,7 +2,7 @@ use crate::js_error;
 use icu_segmenter::{options::SentenceBreakInvariantOptions, SentenceSegmenter};
 use regex::{Regex, RegexBuilder};
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use wasm_bindgen::prelude::*;
 
@@ -162,6 +162,20 @@ impl ResponseProcessing {
             extracted.insert(rule.id.clone(), Value::Array(values));
         }
         ProcessedResponse { text: remove_spans(source, &mut text_spans), audio: remove_spans(source, &mut audio_spans), extracted: Value::Object(extracted) }
+    }
+
+    pub(crate) fn diagnostic_rules(&self, extracted: &Value) -> Value {
+        let extracted = extracted.as_object();
+        Value::Array(self.rules.iter().map(|rule| {
+            let match_count = extracted
+                .and_then(|values| values.get(&rule.id))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let mut removed_from = Vec::new();
+            if rule.remove_from_text { removed_from.push("text"); }
+            if rule.remove_from_audio { removed_from.push("audio"); }
+            json!({ "id":rule.id, "matchCount":match_count, "removedFrom":removed_from })
+        }).collect())
     }
 }
 

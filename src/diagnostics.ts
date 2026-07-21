@@ -19,23 +19,24 @@ export class DiagnosticLog extends EventTarget {
       level,
       category,
       message,
-      // Routine activity stays deliberately terse. Diagnostic payloads are
-      // retained only for errors, where they are useful for support/debugging.
-      details: level === 'error' && meaningful(details) ? details : undefined,
+      // Routine activity stays deliberately terse. The response-processing
+      // category contains only rule ids, counts, removal targets, and sizes;
+      // it deliberately excludes generated or captured text.
+      details: retainedDetails(level, category, details),
     });
   }
 
   upsert(activityKey: string, level: LogLevel, category: string, message: string, details?: unknown) {
     const existing = this.entries.find(entry => entry.activityKey === activityKey);
     if (!existing) {
-      this.append({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), level, category, message, details: level === 'error' && meaningful(details) ? details : undefined, activityKey });
+      this.append({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), level, category, message, details: retainedDetails(level, category, details), activityKey });
       return;
     }
     existing.timestamp = new Date().toISOString();
     existing.level = level;
     existing.category = category;
     existing.message = message;
-    existing.details = level === 'error' && meaningful(details) ? details : undefined;
+    existing.details = retainedDetails(level, category, details);
     this.dispatchEvent(new Event('change'));
   }
 
@@ -63,4 +64,8 @@ export class DiagnosticLog extends EventTarget {
 function meaningful(details: unknown) {
   return details !== undefined && details !== null
     && (!(typeof details === 'object') || Object.keys(details as object).length > 0);
+}
+
+function retainedDetails(level: LogLevel, category: string, details: unknown) {
+  return meaningful(details) && (level === 'error' || category === 'response-processing') ? details : undefined;
 }
